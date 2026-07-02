@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reaper"
+version = "0.1.0"
+description = "Headless HTTP/2 single-packet race-condition detector for authorized bug-bounty and penetration testing."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Bugsy Hewitt" }]
+keywords = ["race-condition", "single-packet-attack", "http2", "security", "bug-bounty", "cwe-362"]
+dependencies = [
+    # httpx: the suite-standard async HTTP client. reaper uses it (via the
+    # scan-primitives ScanClient) for auth/session setup and the sequential
+    # baseline only -- NOT for the synchronized burst (that is raw by necessity).
+    "httpx>=0.27",
+    # h1-reporter: shared HackerOne-markdown report generator (be the 2nd real
+    # adopter after ferryman). Pinned to the suite git remote.
+    "h1-reporter @ git+https://github.com/bugsyhewitt/h1-reporter",
+    # h2: sans-IO HTTP/2 protocol stack. The future single-packet burst engine
+    # drives raw frames over its state machine (declared now; pip-installable).
+    "h2>=4.1",
+    # TODO(v0.1 -- see V0.1-CRITERIA.md shared-infra note): add the scope/auth
+    # client as an install dep once scan-primitives is published:
+    #   "scan-primitives @ git+https://github.com/bugsyhewitt/scan-primitives",
+]
+
+[project.optional-dependencies]
+# hypercorn: the future CI race-lab serves HTTP/2 (+ h2c cleartext, no TLS
+# certs) via Hypercorn -- uvicorn does NOT support HTTP/2 (V0.1-CRITERIA.md).
+# pytest-socket: assert the scope guard blocks egress before any socket opens.
+test = ["pytest>=7.0", "pytest-socket>=0.7", "hypercorn>=0.16"]
+dev = ["pytest>=7.0", "pytest-socket>=0.7", "hypercorn>=0.16"]
+
+[project.urls]
+Homepage = "https://github.com/bugsyhewitt/reaper"
+Repository = "https://github.com/bugsyhewitt/reaper"
+
+[project.scripts]
+reaper = "reaper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "ship_gate: v0.1 release ship-gate (slow; runs build + fresh-venv install)",
+    "integration: needs the live HTTP/2 race-lab fixture (v0.1 build -- see V0.1-CRITERIA.md)",
+]
