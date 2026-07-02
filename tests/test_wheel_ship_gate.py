@@ -4,10 +4,9 @@ Skippable via `pytest -m "not ship_gate"`. Runs in the full v0.1 suite. Mirrors
 ferryman's ship-gate: build -> fresh-venv install -> `reaper --version` ->
 public-API import.
 
-The live acceptance test -- "concurrent redemptions produce >1 success where
-the sequential baseline produces exactly 1" against the Hypercorn race-lab --
-is a marked skip below (the single-packet engine and the CI race-lab fixture are
-NOT built this pass; see V0.1-CRITERIA.md).
+The live acceptance test -- "concurrent redemptions produce >1 success where the
+sequential baseline produces exactly 1" against the Hypercorn race-lab -- now
+lives in ``tests/test_race_lab.py`` (run it with ``pytest -m integration``).
 """
 
 from __future__ import annotations
@@ -83,26 +82,12 @@ def test_installed_wheel_public_api(tmp_path):
     py = venv_dir / "bin" / "python"
     check_script = (
         "import reaper.cli, reaper.findings, reaper.sarif, reaper.reporting, "
-        "reaper.engine, reaper.client; "
+        "reaper.engine, reaper.client, reaper.analysis, reaper.runner, "
+        "reaper.httpspec; "
         "from reaper.findings import Finding; "
         "from reaper.sarif import to_sarif; "
-        "from reaper.reporting import to_h1, to_h1md"
+        "from reaper.reporting import to_h1, to_h1md; "
+        "from reaper.engine import SinglePacketEngine, LastByteSyncEngine; "
+        "from reaper.runner import run_single_scenario, run_group_scenario"
     )
     _run([str(py), "-c", check_script])
-
-
-@pytest.mark.ship_gate
-@pytest.mark.integration
-@pytest.mark.skip(
-    reason="v0.1 build: single-packet engine + Hypercorn race-lab not built "
-    "this pass -- see V0.1-CRITERIA.md (Testability)."
-)
-def test_race_lab_concurrent_beats_sequential():
-    """ACCEPTANCE (v0.1): against the deliberately race-vulnerable Hypercorn lab,
-    N sequential single-use-coupon redemptions yield exactly 1 success (control),
-    while N concurrent redemptions via reaper yield >1 success (over-limit).
-
-    TODO(v0.1): build the Hypercorn h2/h2c race-lab fixture (Fixtures A/B/C) and
-    the single-packet engine, then implement this deterministic gate.
-    """
-    raise AssertionError("unreachable: skipped until the v0.1 engine + lab land")

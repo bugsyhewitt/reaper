@@ -14,20 +14,25 @@ subcommands map to the two v0.1 race modes:
 picks ``h2-single-packet`` (HTTP/2 / h2c) or falls back to
 ``h1-last-byte-sync`` (HTTP/1.1-only targets) -- V0.1-CRITERIA.md #1, #2.
 
-This is the suite-baseline scaffold: ``--version`` and ``--help`` are fully
-wired; the scenario handlers raise ``NotImplementedError`` until the v0.1 build
-lands the engine (:mod:`reaper.engine`) and the baseline client
-(:mod:`reaper.client`). Output would then render via :mod:`reaper.sarif` /
-:mod:`reaper.reporting`, which are already implemented.]
+Each handler orchestrates (via :mod:`reaper.runner`): scope-check + transport
+probe, an opt-in sequential baseline through the ``scan-primitives`` client
+(:mod:`reaper.client`), the synchronized burst through the raw engine
+(:mod:`reaper.engine`), then deviation confirmation (:mod:`reaper.analysis`)
+rendered via :mod:`reaper.sarif` / :mod:`reaper.reporting`.]
 
 Exit codes:
-    0  informational (``--version``)
+    0  ran cleanly, no confirmed race
+    1  ran cleanly, at least one confirmed race emitted
     2  usage / no scenario given (argparse default)
+    3  runtime error (out-of-scope / transport / IO)
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import sys
+from pathlib import Path
 from typing import Sequence
 
 from reaper import __version__
@@ -35,6 +40,7 @@ from reaper.engine import (
     TRANSPORT_AUTO,
     TRANSPORT_H1_LAST_BYTE_SYNC,
     TRANSPORT_H2_SINGLE_PACKET,
+    TransportError,
 )
 
 _TRANSPORTS = (
@@ -44,7 +50,10 @@ _TRANSPORTS = (
 )
 _FORMATS = ("json", "text", "h1md", "sarif")
 
-_NOT_YET = "v0.1 build -- see V0.1-CRITERIA.md"
+# Exit codes beyond argparse's usage-error 2.
+_EXIT_OK = 0  # ran cleanly, no confirmed race
+_EXIT_FINDING = 1  # ran cleanly, at least one confirmed race emitted
+_EXIT_RUNTIME = 3  # out-of-scope / transport / IO failure
 
 
 def _common_options() -> argparse.ArgumentParser:
@@ -77,6 +86,38 @@ def _common_options() -> argparse.ArgumentParser:
         default="json",
         dest="output_format",
         help="finding output format (default: json)",
+    )
+    common.add_argument(
+        "--baseline-samples",
+        type=int,
+        default=0,
+        dest="baseline_samples",
+        metavar="N",
+        help=(
+            "sequential baseline samples to send FIRST via scan-primitives "
+            "(default: 0). Opt-in: on a single-use resource the baseline "
+            "consumes the unit under test; the burst is the authoritative "
+            "over-limit signal"
+        ),
+    )
+    common.add_argument(
+        "--rate-limit",
+        type=float,
+        default=None,
+        dest="rate_limit",
+        metavar="RPS",
+        help="baseline requests/second (scan-primitives token bucket)",
+    )
+    common.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="per-socket / per-request timeout in seconds (default: 10)",
+    )
+    common.add_argument(
+        "--insecure",
+        action="store_true",
+        help="skip TLS certificate verification (https targets only)",
     )
     return common
 
@@ -148,16 +189,113 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_scope(args: argparse.Namespace):
+    """Build the authorized scope: the --scope-file, else just the target host.
+
+    Falling back to a scope of exactly the target host keeps the tool usable
+    without a scope file while still forbidding egress to any other host -- the
+    conservative default for a synchronized burst.
+    """
+    from reaper.httpspec import split_target
+    from scan_primitives import Scope, load_scope
+
+    if args.scope_file:
+        return load_scope(args.scope_file)
+    _scheme, host, _port, _authority = split_target(args.target)
+    return Scope.from_entries([host])
+
+
+def _emit(result, output_format: str) -> None:
+    """Render a ScenarioResult to stdout in the requested format."""
+    from reaper.reporting import to_h1md
+    from reaper.sarif import to_sarif
+
+    findings = result.findings
+    if output_format == "json":
+        print(json.dumps([f.to_dict() for f in findings], indent=2, default=str))
+    elif output_format == "sarif":
+        print(json.dumps(to_sarif(findings), indent=2, default=str))
+    elif output_format == "h1md":
+        print(to_h1md(findings) if findings else "_No confirmed race findings._")
+    else:  # text
+        a = result.analysis
+        print(f"transport: {result.transport}")
+        if a is not None:
+            print(
+                f"baseline successes: {a.baseline_summary['success_count']} "
+                f"| burst successes: {a.burst_success_count} "
+                f"| expected limit: {a.expected_max_successes}"
+            )
+            print(f"timing: {a.timing}")
+            print(f"result: {a.reason}")
+        print(f"confirmed findings: {len(findings)}")
+        for f in findings:
+            print(f"  - [{f.severity}/{f.confidence}] {f.title} ({f.vector})")
+
+
 def _run_single(args: argparse.Namespace) -> int:
-    # V0.1-CRITERIA.md #3 + #5: warm, arm N copies, single-flush, then diff the
-    # sequential baseline against the burst and emit confirmed findings.
-    raise NotImplementedError(_NOT_YET)
+    # V0.1-CRITERIA.md #3 + #5: (opt-in) sequential baseline, arm N copies,
+    # single-flush burst, then diff baseline vs burst and emit confirmed findings.
+    from reaper.httpspec import parse_request_file, split_target
+    from reaper.runner import run_single_scenario
+    from scan_primitives import OutOfScopeError
+
+    try:
+        scope = _load_scope(args)
+        _scheme, _host, _port, authority = split_target(args.target)
+        raw = Path(args.request).read_bytes()
+        request = parse_request_file(raw, default_authority=authority)
+        result = run_single_scenario(
+            target=args.target,
+            scope=scope,
+            request=request,
+            copies=args.copies,
+            transport=args.transport,
+            baseline_samples=args.baseline_samples,
+            rate_limit=args.rate_limit,
+            timeout=args.timeout,
+            verify_tls=not args.insecure,
+        )
+    except OutOfScopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+    except (TransportError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+
+    _emit(result, args.output_format)
+    return _EXIT_FINDING if result.findings else _EXIT_OK
 
 
 def _run_group(args: argparse.Namespace) -> int:
     # V0.1-CRITERIA.md #4 + #5: manual-delay heterogeneous group, one release,
-    # then baseline-vs-burst deviation confirmation.
-    raise NotImplementedError(_NOT_YET)
+    # then burst deviation confirmation.
+    from reaper.httpspec import parse_group_file, split_target
+    from reaper.runner import run_group_scenario
+    from scan_primitives import OutOfScopeError
+
+    try:
+        scope = _load_scope(args)
+        _scheme, _host, _port, authority = split_target(args.target)
+        raw = Path(args.group_file).read_bytes()
+        group = parse_group_file(raw, default_authority=authority)
+        result = run_group_scenario(
+            target=args.target,
+            scope=scope,
+            group=group,
+            transport=args.transport,
+            timeout=args.timeout,
+            verify_tls=not args.insecure,
+        )
+    except OutOfScopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+    except (TransportError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+
+    _emit(result, args.output_format)
+    return _EXIT_FINDING if result.findings else _EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:

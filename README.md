@@ -17,12 +17,11 @@ Where PortSwigger's Turbo Intruder is Burp/Jython-locked, reaper is a standalone
 CLI. Findings come out in the suite finding schema, **SARIF 2.1.0**, and
 HackerOne markdown (via `h1-reporter`).
 
-> **Status:** suite-baseline scaffold. The findings / SARIF / HackerOne output
-> surface is fully implemented and tested. The low-level single-packet engine,
-> the HTTP/1.1 last-byte-sync fallback, connection warming, deviation
-> confirmation, and the CI race-lab are **v0.1-pending** (see
-> [Roadmap](#roadmap) and `V0.1-CRITERIA.md`). Scenario commands currently raise
-> `NotImplementedError`.
+> **Status:** v0.1. The HTTP/2 single-packet engine (TLS + h2c cleartext), the
+> HTTP/1.1 last-byte-sync fallback with connection warming, the scan-primitives
+> baseline client, benchmark→burst deviation confirmation with a final-state
+> false-positive guard, and the Hypercorn CI race-lab are all built and tested.
+> The findings / SARIF / HackerOne output surface is unchanged.
 
 ## Ethical Use
 
@@ -84,9 +83,20 @@ reaper group --target https://app.example.com \
   --group-file scenario.group --scope-file scope.txt
 ```
 
-> Both scenarios are **v0.1-pending** — they currently raise
-> `NotImplementedError` until the single-packet engine lands. `--version` and
-> `--help` are fully wired today.
+The group file is a sequence of raw HTTP requests separated by a line that is
+exactly `%%%`; each block may be preceded by an `@delay <seconds>` directive
+setting that request's **manual** release offset within the synchronized window
+(never auto-calibrated — see [Roadmap](#roadmap)).
+
+**Methodology.** reaper's authoritative over-limit signal is the concurrent
+burst itself: a correctly synchronized server yields exactly **one** success even
+under a synchronized burst, so *more* successes than the resource's limit is the
+race. A sequential baseline (`--baseline-samples N`) is **opt-in** — on a
+single-use resource it consumes the very unit under test — and, when supplied,
+runs first to establish the expected limit and the deviation reference. reaper
+guards the **final-state false positive**: a surplus success that a later request
+overwrites is not reported as confirmed. Exit code is `1` when a race is
+confirmed, `0` when none is, `3` on an out-of-scope / transport / IO error.
 
 ### Transport auto-selection
 
@@ -107,9 +117,11 @@ reaper --version
 reaper single --target URL --request REQFILE --copies N
               [--transport {auto,h2-single-packet,h1-last-byte-sync}]
               [--scope-file PATH] [--format {json,text,h1md,sarif}]
+              [--baseline-samples N] [--rate-limit RPS] [--timeout S] [--insecure]
 reaper group  --target URL --group-file GROUPFILE
               [--transport {auto,h2-single-packet,h1-last-byte-sync}]
               [--scope-file PATH] [--format {json,text,h1md,sarif}]
+              [--timeout S] [--insecure]
 ```
 
 - `--target` — the URL / host the race is fired against (must be in scope).
@@ -118,7 +130,13 @@ reaper group  --target URL --group-file GROUPFILE
 - `--group-file` — request-group file: heterogeneous requests + manual delays.
 - `--transport` — burst transport (default `auto`).
 - `--scope-file` — scope file (one host/CIDR per line); enforced before any burst.
+  With no `--scope-file`, scope defaults to exactly the target host.
 - `--format` — finding output: `json` (default), `text`, `h1md`, or `sarif`.
+- `--baseline-samples` — sequential baseline samples to send first (default `0`,
+  opt-in; see Methodology above).
+- `--rate-limit` — baseline requests/second (scan-primitives token bucket).
+- `--timeout` — per-socket / per-request timeout in seconds (default `10`).
+- `--insecure` — skip TLS certificate verification (`https` targets only).
 
 ## Example output
 
@@ -157,12 +175,17 @@ are treated strictly as data (R5) — never evaluated, never LLM-judged.
 
 ```bash
 pip install -e ".[dev]"
-pytest -m "not ship_gate"
+pytest -m "not ship_gate and not integration"   # fast unit tests
+pytest -m integration                            # live Hypercorn race-lab
+pytest -m ship_gate                              # build → fresh-venv install
 ```
 
-The `ship_gate` marker runs the slow build → fresh-venv install → `--version`
-gate. The `integration` marker covers the live Hypercorn race-lab acceptance
-test (v0.1-pending).
+The `integration` marker runs the live Hypercorn race-lab acceptance test:
+against a deliberately race-vulnerable single-use-coupon app, N sequential
+redemptions yield exactly **1** success (control) while N concurrent redemptions
+via reaper's single-packet engine yield **>1** (over-limit). It skips cleanly if
+`hypercorn` is not installed. The `ship_gate` marker runs the slow build →
+fresh-venv install → `--version` → public-API gate.
 
 ## Roadmap
 

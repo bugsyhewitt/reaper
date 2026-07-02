@@ -9,9 +9,11 @@ and opening a true atomic race window. It benchmarks a sequential baseline,
 fires the concurrent burst, and flags statistical deviations (status / body /
 timing / second-order) as findings.
 
-This package is the suite-baseline scaffold. The findings/SARIF/HackerOne output
-surface is fully implemented; the low-level single-packet engine and the shared
-auth/baseline client are stubs pending the v0.1 build (see ``V0.1-CRITERIA.md``).
+v0.1 is complete: the low-level single-packet engine (:mod:`reaper.engine`), the
+scan-primitives auth/baseline client (:mod:`reaper.client`), the benchmark→burst
+deviation confirmation (:mod:`reaper.analysis`), and the scenario orchestration
+(:mod:`reaper.runner`) are all implemented, alongside the findings/SARIF/HackerOne
+output surface.
 """
 
 from __future__ import annotations

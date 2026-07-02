@@ -19,20 +19,22 @@ dependencies = [
     # h1-reporter: shared HackerOne-markdown report generator (be the 2nd real
     # adopter after ferryman). Pinned to the suite git remote.
     "h1-reporter @ git+https://github.com/bugsyhewitt/h1-reporter",
-    # h2: sans-IO HTTP/2 protocol stack. The future single-packet burst engine
-    # drives raw frames over its state machine (declared now; pip-installable).
+    # h2: sans-IO HTTP/2 protocol stack. The single-packet burst engine drives
+    # raw frames over its state machine (reaper/engine.py).
     "h2>=4.1",
-    # TODO(v0.1 -- see V0.1-CRITERIA.md shared-infra note): add the scope/auth
-    # client as an install dep once scan-primitives is published:
-    #   "scan-primitives @ git+https://github.com/bugsyhewitt/scan-primitives",
+    # scan-primitives: the suite scope engine + scope-enforcing async HTTP
+    # client. reaper uses it for auth/session setup + the sequential baseline
+    # (reaper/client.py) and passes the same Scope into the raw burst engine so
+    # the burst is scope-checked too (V0.1-CRITERIA.md #6, shared-infra note).
+    "scan-primitives @ git+https://github.com/bugsyhewitt/scan-primitives",
 ]
 
 [project.optional-dependencies]
 # hypercorn: the future CI race-lab serves HTTP/2 (+ h2c cleartext, no TLS
 # certs) via Hypercorn -- uvicorn does NOT support HTTP/2 (V0.1-CRITERIA.md).
 # pytest-socket: assert the scope guard blocks egress before any socket opens.
-test = ["pytest>=7.0", "pytest-socket>=0.7", "hypercorn>=0.16"]
-dev = ["pytest>=7.0", "pytest-socket>=0.7", "hypercorn>=0.16"]
+test = ["pytest>=7.0", "pytest-socket>=0.7", "hypercorn>=0.16", "build>=1.0"]
+dev = ["pytest>=7.0", "pytest-socket>=0.7", "hypercorn>=0.16", "build>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/bugsyhewitt/reaper"
