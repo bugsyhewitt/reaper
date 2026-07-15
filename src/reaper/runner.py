@@ -27,6 +27,12 @@ from typing import Any
 import dataclasses
 
 from reaper.analysis import RaceAnalysis, build_finding, confirm_race
+from reaper.chain import (
+    ChainEndpointResult,
+    StateChainAnalysis,
+    analyze_chain,
+    build_chain_finding,
+)
 from reaper.client import BaselineClient
 from reaper.engine import (
     TRANSPORT_AUTO,
@@ -40,7 +46,13 @@ from reaper.engine import (
 from reaper.findings import Finding
 from reaper.httpspec import RaceRequest, ResponseSignature, split_target
 
-__all__ = ["ScenarioResult", "run_group_scenario", "run_single_scenario"]
+__all__ = [
+    "ScenarioResult",
+    "StateChainResult",
+    "run_group_scenario",
+    "run_single_scenario",
+    "run_state_chain_scenario",
+]
 
 
 class ScenarioResult:
@@ -197,6 +209,111 @@ def run_single_scenario(
         transport=chosen,
         baseline=baseline,
         burst=burst,
+        analysis=analysis,
+        findings=[finding] if finding else [],
+    )
+
+
+class StateChainResult:
+    """The result of running a state-chain scenario."""
+
+    def __init__(
+        self,
+        *,
+        transport: str,
+        chain_results: list[ChainEndpointResult],
+        analysis: StateChainAnalysis,
+        findings: list[Finding],
+    ) -> None:
+        self.transport = transport
+        self.chain_results = chain_results
+        self.analysis = analysis
+        self.findings = findings
+
+
+def run_state_chain_scenario(
+    *,
+    target: str,
+    scope: Any,
+    chain: list[tuple[str, RaceRequest]],
+    transport: str = TRANSPORT_AUTO,
+    window_ms: float = 10.0,
+    expected_status: int | None = None,
+    proxy: str | None = None,
+    settle: float = 0.1,
+    timeout: float = 10.0,
+    verify_tls: bool = True,
+    finding_id: str = "reaper-0002",
+) -> StateChainResult:
+    """Sub-state multi-endpoint chain scenario (v0.5 ``--state-chain``).
+
+    Fires one request per endpoint simultaneously on a single HTTP/2 connection
+    so that the final DATA frames for ALL endpoints are sent in one ``send()``
+    call.  The existing ``SinglePacketEngine.run_group`` engine drives the burst;
+    this function adds per-endpoint labeling, timing-spread analysis, and
+    differential-response detection.
+
+    Parameters
+    ----------
+    chain:
+        Ordered list of ``(label, request)`` pairs -- one per endpoint.  The
+        label is used in the analysis output (typically the source filename).
+    window_ms:
+        Maximum acceptable client-side response-time spread (proxy for
+        server-side co-arrival).  Default 10 ms.
+    expected_status:
+        HTTP status considered "normal" for every endpoint.  Any endpoint that
+        returns a different status is flagged as a differential hit.  Defaults
+        to 200.
+    """
+    if scope is not None:
+        scope.assert_in_scope(target)
+
+    if len(chain) < 2:
+        raise ValueError("a state-chain needs at least 2 endpoints")
+
+    chosen = select_transport(
+        target, prefer=transport, scope=scope, verify_tls=verify_tls, proxy=proxy
+    )
+    if chosen != TRANSPORT_H2_SINGLE_PACKET:
+        raise TransportError(
+            "state-chain mode needs one multiplexed HTTP/2 connection; target "
+            "does not speak HTTP/2 (h2 / h2c)"
+        )
+
+    labels = [label for label, _ in chain]
+    requests = [req for _, req in chain]
+
+    engine = SinglePacketEngine(
+        scope, target, settle=settle, timeout=timeout,
+        verify_tls=verify_tls, proxy=proxy,
+    )
+    signatures = engine.run_group(requests)
+
+    chain_results = [
+        ChainEndpointResult(label=label, request=req, signature=sig)
+        for label, req, sig in zip(labels, requests, signatures)
+    ]
+
+    analysis = analyze_chain(
+        chain_results, window_ms=window_ms, expected_status=expected_status
+    )
+
+    _, _, _, _auth = split_target(target)
+    first_path = requests[0].path if requests else "/"
+    vector = _vector(chosen, first_path)
+
+    finding = build_chain_finding(
+        analysis,
+        target=target,
+        vector=vector,
+        finding_id=finding_id,
+        references=["https://portswigger.net/research/smashing-the-state-machine"],
+    )
+
+    return StateChainResult(
+        transport=chosen,
+        chain_results=chain_results,
         analysis=analysis,
         findings=[finding] if finding else [],
     )
