@@ -101,13 +101,16 @@ def _make_engine(
     settle: float,
     timeout: float,
     verify_tls: bool,
+    proxy: str | None = None,
 ) -> SinglePacketEngine | LastByteSyncEngine:
     if transport == TRANSPORT_H1_LAST_BYTE_SYNC:
         return LastByteSyncEngine(
-            scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls
+            scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls,
+            proxy=proxy,
         )
     return SinglePacketEngine(
-        scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls
+        scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls,
+        proxy=proxy,
     )
 
 
@@ -137,7 +140,7 @@ def run_single_scenario(
         scope.assert_in_scope(target)
 
     chosen = select_transport(
-        target, prefer=transport, scope=scope, verify_tls=verify_tls
+        target, prefer=transport, scope=scope, verify_tls=verify_tls, proxy=proxy
     )
 
     baseline: list[ResponseSignature] = []
@@ -154,7 +157,8 @@ def run_single_scenario(
         )
 
     engine = _make_engine(
-        chosen, scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls
+        chosen, scope, target, settle=settle, timeout=timeout,
+        verify_tls=verify_tls, proxy=proxy,
     )
     try:
         burst = engine.run_single_endpoint(request, copies)
@@ -164,7 +168,7 @@ def run_single_scenario(
             chosen = TRANSPORT_H1_LAST_BYTE_SYNC
             engine = _make_engine(
                 chosen, scope, target, settle=settle, timeout=timeout,
-                verify_tls=verify_tls,
+                verify_tls=verify_tls, proxy=proxy,
             )
             burst = engine.run_single_endpoint(request, copies)
         else:
@@ -204,6 +208,7 @@ def run_group_scenario(
     transport: str = TRANSPORT_AUTO,
     expected_max_successes: int | None = None,
     final_state_success_count: int | None = None,
+    proxy: str | None = None,
     settle: float = 0.1,
     timeout: float = 10.0,
     verify_tls: bool = True,
@@ -220,7 +225,7 @@ def run_group_scenario(
         scope.assert_in_scope(target)
 
     chosen = select_transport(
-        target, prefer=transport, scope=scope, verify_tls=verify_tls
+        target, prefer=transport, scope=scope, verify_tls=verify_tls, proxy=proxy
     )
     if chosen != TRANSPORT_H2_SINGLE_PACKET:
         raise TransportError(
@@ -229,7 +234,8 @@ def run_group_scenario(
         )
 
     engine = SinglePacketEngine(
-        scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls
+        scope, target, settle=settle, timeout=timeout, verify_tls=verify_tls,
+        proxy=proxy,
     )
     burst = engine.run_group(group)
 
