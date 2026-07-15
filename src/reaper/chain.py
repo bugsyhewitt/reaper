@@ -92,7 +92,8 @@ def analyze_chain(
 
     exp = expected_status if expected_status is not None else 200
     times = [r.signature.elapsed_ms for r in results]
-    spread = round(max(times) - min(times), 3)
+    mn, mx = min(times), max(times)
+    spread = round(mx - mn, 3)
     within_window = spread <= window_ms
 
     per_endpoint = [
@@ -112,8 +113,8 @@ def analyze_chain(
     timing: dict = {
         "unit": "ms",
         "samples": len(times),
-        "min": round(min(times), 3),
-        "max": round(max(times), 3),
+        "min": round(mn, 3),
+        "max": round(mx, 3),
         "mean": round(fmean(times), 3),
         "spread": spread,
         "stdev": round(pstdev(times), 3) if len(times) > 1 else 0.0,

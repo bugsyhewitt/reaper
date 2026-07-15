@@ -386,10 +386,7 @@ def _run_single(args: argparse.Namespace) -> int:
 
 
 def _run_detect(args: argparse.Namespace) -> int:
-    import json as _json
-
     from reaper.detect import run_detect
-    from reaper.httpspec import split_target
     from scan_primitives import OutOfScopeError
 
     if args.probe_copies < 2:
@@ -397,13 +394,7 @@ def _run_detect(args: argparse.Namespace) -> int:
         return _EXIT_RUNTIME
 
     try:
-        if args.scope_file:
-            from scan_primitives import load_scope
-            scope = load_scope(args.scope_file)
-        else:
-            _scheme, host, _port, _authority = split_target(args.target)
-            from scan_primitives import Scope
-            scope = Scope.from_entries([host])
+        scope = _load_scope(args)
 
         result = run_detect(
             target=args.target,
@@ -421,7 +412,7 @@ def _run_detect(args: argparse.Namespace) -> int:
         return _EXIT_RUNTIME
 
     if args.output_format == "json":
-        print(_json.dumps(result.to_dict(), indent=2))
+        print(json.dumps(result.to_dict(), indent=2))
     else:
         print(f"transport : {result.transport}")
         print(f"protocol  : {result.protocol}")
@@ -484,8 +475,6 @@ def _run_state_chain(args: argparse.Namespace) -> int:
     synchronized window via SinglePacketEngine.run_group, then reports
     per-endpoint timing spread and differential responses.
     """
-    import json as _json
-
     from reaper.httpspec import parse_request_file, split_target
     from reaper.runner import run_state_chain_scenario
     from scan_primitives import OutOfScopeError
@@ -541,10 +530,10 @@ def _run_state_chain(args: argparse.Namespace) -> int:
             },
             "findings": [f.to_dict() for f in findings],
         }
-        print(_json.dumps(out, indent=2, default=str))
+        print(json.dumps(out, indent=2, default=str))
     elif fmt == "sarif":
         from reaper.sarif import to_sarif
-        print(_json.dumps(to_sarif(findings), indent=2, default=str))
+        print(json.dumps(to_sarif(findings), indent=2, default=str))
     elif fmt == "h1md":
         from reaper.reporting import to_h1md
         print(to_h1md(findings) if findings else "_No confirmed chain findings._")
