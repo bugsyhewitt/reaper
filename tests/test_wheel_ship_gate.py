@@ -33,8 +33,8 @@ def test_wheel_builds_cleanly(tmp_path):
         [sys.executable, "-m", "build", "--wheel", "--sdist", "--outdir", str(out)],
         cwd=REPO_ROOT,
     )
-    wheels = list(out.glob("reaper-0.5.0-*.whl"))
-    sdists = list(out.glob("reaper-0.5.0.tar.gz"))
+    wheels = list(out.glob("reaper-1.0.0-*.whl"))
+    sdists = list(out.glob("reaper-1.0.0.tar.gz"))
     assert wheels, f"wheel not built; got: {list(out.iterdir())}"
     assert sdists, f"sdist not built; got: {list(out.iterdir())}"
     test_wheel_builds_cleanly._wheel = wheels[0]
@@ -56,7 +56,7 @@ def test_wheel_installs_into_fresh_venv(tmp_path):
 
     cli = venv_dir / "bin" / "reaper"
     version_out = _run([str(cli), "--version"]).stdout.strip()
-    assert version_out == "reaper 0.5.0", f"unexpected --version output: {version_out!r}"
+    assert version_out == "reaper 1.0.0", f"unexpected --version output: {version_out!r}"
 
     test_wheel_installs_into_fresh_venv._venv_dir = venv_dir
 
@@ -69,7 +69,7 @@ def test_wheel_version_importable_in_fresh_venv(tmp_path):
         pytest.skip("preceding install test did not build a venv")
 
     py = venv_dir / "bin" / "python"
-    _run([str(py), "-c", "import reaper; assert reaper.__version__ == '0.5.0'"])
+    _run([str(py), "-c", "import reaper; assert reaper.__version__ == '1.0.0'"])
 
 
 @pytest.mark.ship_gate
