@@ -194,6 +194,29 @@ def build_parser() -> argparse.ArgumentParser:
         dest="group_file",
         help="request-group file: heterogeneous requests + manual per-request delays",
     )
+    p_group.add_argument(
+        "--auto-delay",
+        action="store_true",
+        default=False,
+        dest="auto_delay",
+        help=(
+            "Auto-calibrate per-request delays from measured RTT (Kettle timing). "
+            "Sends --auto-delay-samples warm-up GET / requests before the burst "
+            "to measure the baseline round-trip time, then sets "
+            "delay[i] = i * rtt / N. Overrides @delay values in the group file."
+        ),
+    )
+    p_group.add_argument(
+        "--auto-delay-samples",
+        type=int,
+        default=3,
+        metavar="N",
+        dest="auto_delay_samples",
+        help=(
+            "Number of warm-up GET / requests sent to measure RTT when "
+            "--auto-delay is set (default: 3)."
+        ),
+    )
     p_group.set_defaults(handler=_run_group)
 
     return parser
@@ -298,6 +321,8 @@ def _run_group(args: argparse.Namespace) -> int:
             proxy=getattr(args, "proxy", None),
             timeout=args.timeout,
             verify_tls=not args.insecure,
+            auto_delay=args.auto_delay,
+            auto_delay_samples=args.auto_delay_samples,
         )
     except OutOfScopeError as exc:
         print(f"error: {exc}", file=sys.stderr)
