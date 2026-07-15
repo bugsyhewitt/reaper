@@ -17,12 +17,17 @@ Where PortSwigger's Turbo Intruder is Burp/Jython-locked, reaper is a standalone
 CLI. Findings come out in the suite finding schema, **SARIF 2.1.0**, and
 HackerOne markdown (via `h1-reporter`).
 
-> **Status:** v0.4. The v0.1 core (HTTP/2 single-packet engine, HTTP/1.1
-> last-byte-sync fallback, scan-primitives baseline, deviation confirmation) is
-> complete. v0.2 added **SOCKS5 proxy support**. v0.3 adds **auto-calibrated
-> delay** (`--auto-delay`) for the group scenario. v0.4 adds **`reaper detect`**
-> — a pre-attack recon command that auto-detects transport (H2 vs H1.1) and
-> estimates race window width by firing a non-destructive probe burst.
+> **Status:** v1.0.0. The core engine is complete and stable across six
+> shipped milestones:
+> - v0.1 — HTTP/2 single-packet engine, HTTP/1.1 last-byte-sync fallback,
+>   scan-primitives baseline client, statistical deviation confirmation, SARIF
+>   2.1.0 + HackerOne output, CI race-lab
+> - v0.2 — SOCKS5 proxy support (`--proxy socks5://host:port`)
+> - v0.3 — Auto-calibrated group delay (`--auto-delay`, Kettle RTT timing)
+> - v0.4 — `reaper detect` pre-attack recon (transport probe + race-window
+>   estimation)
+> - v0.5 — `reaper group --state-chain` multi-endpoint TOCTOU chain
+> - v1.0.0 — stable release; all v0.1 criteria met, no known open gaps
 
 ## Ethical Use
 
@@ -276,7 +281,21 @@ confirmation, and the CI race-lab are the v0.1 build (see `V0.1-CRITERIA.md`).
   (`concurrent` / `serialized`), and a recommended attack invocation. Useful as
   a first step before committing to a full race attempt.
 
-**Deferred (post-v0.4):**
+**Shipped in v0.5:**
+
+- **`reaper group --state-chain file1,file2,...`** — multi-endpoint TOCTOU
+  chain. Fires one request per endpoint simultaneously on a single HTTP/2
+  connection (one synchronized `send()` call). Per-endpoint timing spread and
+  differential-response detection flag TOCTOU races where the classic
+  single-endpoint mode does not apply (e.g. race `/transfer` + `/balance-check`
+  on separate endpoints sharing one resource).
+
+**Shipped in v1.0.0:**
+
+- Version bump and stable release. All v0.1 acceptance criteria are met and all
+  planned improvements through v0.5 are shipped. The engine API is now stable.
+
+**Future work (post-v1.0.0):**
 
 - **First-sequence-sync / >65KB bodies / >~30 requests** (RyotaK: IP
   fragmentation + TCP sequence reordering at L3–L4; needs scapy, raw sockets,

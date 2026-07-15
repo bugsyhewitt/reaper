@@ -9,16 +9,19 @@ and opening a true atomic race window. It benchmarks a sequential baseline,
 fires the concurrent burst, and flags statistical deviations (status / body /
 timing / second-order) as findings.
 
-v0.1 is complete: the low-level single-packet engine (:mod:`reaper.engine`), the
-scan-primitives auth/baseline client (:mod:`reaper.client`), the benchmark→burst
-deviation confirmation (:mod:`reaper.analysis`), and the scenario orchestration
-(:mod:`reaper.runner`) are all implemented, alongside the findings/SARIF/HackerOne
-output surface.
+v1.0.0 is complete: the low-level single-packet engine (:mod:`reaper.engine`),
+the scan-primitives auth/baseline client (:mod:`reaper.client`), the
+benchmark→burst deviation confirmation (:mod:`reaper.analysis`), the scenario
+orchestration (:mod:`reaper.runner`), SOCKS5 proxy support, auto-calibrated
+group delay (:mod:`reaper.autodelay`), the pre-attack detect command
+(:mod:`reaper.detect`), and the multi-endpoint TOCTOU chain
+(:mod:`reaper.chain`) are all implemented alongside the
+findings/SARIF/HackerOne output surface.
 """
 
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "1.0.0"
 
 from reaper.findings import CONFIDENCES, SEVERITIES, Finding
 
