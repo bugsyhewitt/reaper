@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import socket
 import ssl
+import struct
 import time
 from typing import Any
+from urllib.parse import urlsplit as _urlsplit
 
 from h2.config import H2Configuration
 from h2.connection import H2Connection
@@ -60,6 +62,7 @@ __all__ = [
     "SinglePacketEngine",
     "TransportError",
     "select_transport",
+    "parse_socks5_proxy",
 ]
 
 # Transport selection tokens (mirrors the --transport CLI choices).
@@ -87,10 +90,130 @@ class TransportError(RuntimeError):
     """
 
 
+# --------------------------------------------------------------------------- #
+# SOCKS5 proxy tunnel (RFC 1928, no-auth / domain-name address type)
+# --------------------------------------------------------------------------- #
+
+_SOCKS5_ERRORS = {
+    1: "general failure",
+    2: "connection not allowed by ruleset",
+    3: "network unreachable",
+    4: "host unreachable",
+    5: "connection refused",
+    6: "TTL expired",
+    7: "command not supported",
+    8: "address type not supported",
+}
+
+
+def parse_socks5_proxy(proxy: str) -> tuple[str, int]:
+    """Parse a ``socks5://host:port`` URL into ``(host, port)``.
+
+    Accepted schemes: ``socks5``, ``socks5h``.  Default port is 1080.
+    Raises :class:`ValueError` on bad input; does not open any socket.
+    """
+    parts = _urlsplit(proxy)
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("socks5", "socks5h"):
+        raise ValueError(
+            f"reaper's raw engine only supports socks5:// proxies; got {proxy!r}"
+        )
+    host = parts.hostname
+    if not host:
+        raise ValueError(f"cannot parse proxy host from {proxy!r}")
+    return host, parts.port or 1080
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    """Receive exactly *n* bytes from *sock*; raise ``OSError`` on short read."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise OSError(
+                f"SOCKS5 connection closed after {len(buf)}/{n} bytes"
+            )
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _socks5_tunnel(
+    proxy_host: str,
+    proxy_port: int,
+    target_host: str,
+    target_port: int,
+    timeout: float,
+) -> socket.socket:
+    """Open a raw TCP socket tunnelled through a SOCKS5 proxy via CONNECT.
+
+    Uses no-auth (RFC 1928 §3 method 0x00) and the DOMAINNAME address type so
+    the proxy resolves the hostname — important for targets only reachable from
+    the proxy network (internal labs, VPN-gated hosts). Returns the socket with
+    the tunnel already established; the caller can then do TLS or H2 on top.
+
+    Raises :class:`TransportError` on SOCKS5 negotiation failure.
+    """
+    sock = _tcp_connect(proxy_host, proxy_port, timeout)
+    try:
+        # -- Method negotiation (RFC 1928 §3) ---------------------------------
+        sock.sendall(b"\x05\x01\x00")       # VER=5, NMETHODS=1, METHOD=NO_AUTH
+        reply = _recv_exact(sock, 2)
+        if reply[0] != 5:
+            raise TransportError(
+                f"SOCKS5 server sent unexpected version {reply[0]!r}"
+            )
+        if reply[1] != 0:
+            raise TransportError(
+                f"SOCKS5 server rejected no-auth (reply byte {reply[1]!r})"
+            )
+
+        # -- CONNECT request (RFC 1928 §4, ATYP=0x03 DOMAINNAME) -------------
+        host_bytes = target_host.encode("idna")
+        req = (
+            bytes([5, 1, 0, 3, len(host_bytes)])
+            + host_bytes
+            + struct.pack(">H", target_port)
+        )
+        sock.sendall(req)
+
+        # -- Reply (RFC 1928 §6) ----------------------------------------------
+        hdr = _recv_exact(sock, 4)      # VER, REP, RSV, ATYP
+        rep = hdr[1]
+        if rep != 0:
+            msg = _SOCKS5_ERRORS.get(rep, f"code {rep}")
+            raise TransportError(f"SOCKS5 CONNECT failed: {msg}")
+        atyp = hdr[3]
+        if atyp == 1:                   # IPv4 — skip 4-byte addr + 2-byte port
+            _recv_exact(sock, 6)
+        elif atyp == 3:                 # DOMAINNAME — skip len + name + port
+            dlen = _recv_exact(sock, 1)[0]
+            _recv_exact(sock, dlen + 2)
+        elif atyp == 4:                 # IPv6 — skip 16-byte addr + 2-byte port
+            _recv_exact(sock, 18)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
 def _tcp_connect(host: str, port: int, timeout: float) -> socket.socket:
     sock = socket.create_connection((host, port), timeout=timeout)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return sock
+
+
+def _tcp_connect_proxied(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    proxy: str | None,
+) -> socket.socket:
+    """Connect to host:port directly or via a SOCKS5 proxy."""
+    if proxy is None:
+        return _tcp_connect(host, port, timeout)
+    proxy_host, proxy_port = parse_socks5_proxy(proxy)
+    return _socks5_tunnel(proxy_host, proxy_port, host, port, timeout)
 
 
 def _maybe_tls(
@@ -124,6 +247,7 @@ def select_transport(
     scope: Any = None,
     timeout: float = 3.0,
     verify_tls: bool = True,
+    proxy: str | None = None,
 ) -> str:
     """Choose the burst transport for ``target``.
 
@@ -131,6 +255,9 @@ def select_transport(
     HTTP/2 (ALPN ``h2`` for TLS, or an h2c prior-knowledge handshake for
     cleartext) selects :data:`TRANSPORT_H2_SINGLE_PACKET`; anything else falls
     back to :data:`TRANSPORT_H1_LAST_BYTE_SYNC` (V0.1-CRITERIA.md #1, #2).
+
+    When ``proxy`` is set the probe is routed through the SOCKS5 proxy so the
+    transport selection reflects what the proxy can reach.
 
     SAFETY: scope is asserted before the probe opens any socket.
     """
@@ -144,20 +271,27 @@ def select_transport(
         if scheme == "https":
             return (
                 TRANSPORT_H2_SINGLE_PACKET
-                if _probe_alpn_h2(host, port, timeout, verify_tls)
+                if _probe_alpn_h2(host, port, timeout, verify_tls, proxy=proxy)
                 else TRANSPORT_H1_LAST_BYTE_SYNC
             )
         return (
             TRANSPORT_H2_SINGLE_PACKET
-            if _probe_h2c(host, port, timeout)
+            if _probe_h2c(host, port, timeout, proxy=proxy)
             else TRANSPORT_H1_LAST_BYTE_SYNC
         )
     except OSError:
         return TRANSPORT_H1_LAST_BYTE_SYNC
 
 
-def _probe_alpn_h2(host: str, port: int, timeout: float, verify: bool) -> bool:
-    raw = _tcp_connect(host, port, timeout)
+def _probe_alpn_h2(
+    host: str,
+    port: int,
+    timeout: float,
+    verify: bool,
+    *,
+    proxy: str | None = None,
+) -> bool:
+    raw = _tcp_connect_proxied(host, port, timeout, proxy=proxy)
     try:
         tls = _maybe_tls(
             raw, "https", host, alpn=["h2", "http/1.1"], verify=verify
@@ -171,9 +305,15 @@ def _probe_alpn_h2(host: str, port: int, timeout: float, verify: bool) -> bool:
         return False
 
 
-def _probe_h2c(host: str, port: int, timeout: float) -> bool:
+def _probe_h2c(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    proxy: str | None = None,
+) -> bool:
     """Return True if the cleartext peer speaks HTTP/2 with prior knowledge."""
-    sock = _tcp_connect(host, port, timeout)
+    sock = _tcp_connect_proxied(host, port, timeout, proxy=proxy)
     try:
         conn = H2Connection(config=H2Configuration(client_side=True))
         conn.initiate_connection()
@@ -233,6 +373,7 @@ class SinglePacketEngine:
         tcp_nodelay: bool = False,
         warm_ping: bool = True,
         verify_tls: bool = True,
+        proxy: str | None = None,
     ) -> None:
         self.scope = scope
         self.target = target
@@ -242,6 +383,7 @@ class SinglePacketEngine:
         self.tcp_nodelay = tcp_nodelay
         self.warm_ping = warm_ping
         self.verify_tls = verify_tls
+        self.proxy = proxy
 
     # -- scope + connection ------------------------------------------------- #
 
@@ -254,7 +396,7 @@ class SinglePacketEngine:
         if self.target is None:
             raise TransportError("no target set on the engine")
         scheme, host, port, authority = split_target(self.target)
-        sock = _tcp_connect(host, port, self.timeout)
+        sock = _tcp_connect_proxied(host, port, self.timeout, proxy=self.proxy)
         try:
             sock = _maybe_tls(
                 sock, scheme, host, alpn=["h2"], verify=self.verify_tls
@@ -490,6 +632,7 @@ class LastByteSyncEngine:
         timeout: float = _DEFAULT_TIMEOUT,
         warm: bool = True,
         verify_tls: bool = True,
+        proxy: str | None = None,
     ) -> None:
         self.scope = scope
         self.target = target
@@ -497,13 +640,14 @@ class LastByteSyncEngine:
         self.timeout = timeout
         self.warm = warm
         self.verify_tls = verify_tls
+        self.proxy = proxy
 
     def _assert_scope(self) -> None:
         if self.scope is not None and self.target is not None:
             self.scope.assert_in_scope(self.target)
 
     def _open(self, scheme: str, host: str, port: int) -> socket.socket:
-        sock = _tcp_connect(host, port, self.timeout)
+        sock = _tcp_connect_proxied(host, port, self.timeout, proxy=self.proxy)
         return _maybe_tls(
             sock, scheme, host, alpn=["http/1.1"], verify=self.verify_tls
         )

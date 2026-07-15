@@ -17,11 +17,11 @@ Where PortSwigger's Turbo Intruder is Burp/Jython-locked, reaper is a standalone
 CLI. Findings come out in the suite finding schema, **SARIF 2.1.0**, and
 HackerOne markdown (via `h1-reporter`).
 
-> **Status:** v0.1. The HTTP/2 single-packet engine (TLS + h2c cleartext), the
-> HTTP/1.1 last-byte-sync fallback with connection warming, the scan-primitives
-> baseline client, benchmark→burst deviation confirmation with a final-state
-> false-positive guard, and the Hypercorn CI race-lab are all built and tested.
-> The findings / SARIF / HackerOne output surface is unchanged.
+> **Status:** v0.2. The v0.1 core (HTTP/2 single-packet engine, HTTP/1.1
+> last-byte-sync fallback, scan-primitives baseline, deviation confirmation) is
+> complete. v0.2 adds **SOCKS5 proxy support** — route the baseline and raw
+> H2/H1 burst through any SOCKS5 proxy (Caido, Burp, Tor, internal pivot) via
+> `--proxy socks5://host:port`.
 
 ## Ethical Use
 
@@ -98,6 +98,31 @@ guards the **final-state false positive**: a surplus success that a later reques
 overwrites is not reported as confirmed. Exit code is `1` when a race is
 confirmed, `0` when none is, `3` on an out-of-scope / transport / IO error.
 
+### SOCKS5 proxy
+
+`--proxy socks5://host:port` routes **all** traffic through a SOCKS5 proxy —
+both the scan-primitives sequential baseline requests and the raw H2/H1 burst
+sockets. This is useful when:
+
+- The target is only reachable from an internal network (pivoting via a SOCKS5
+  tunnel created by your C2 or SSH `-D`).
+- You want to capture the synchronized burst through Caido or Burp for
+  inspection (Burp → Proxy → SOCKS upstream; point reaper at Burp's SOCKS port).
+
+```bash
+reaper single --target http://internal.corp/api/redeem \
+  --request redeem.http --copies 20 \
+  --proxy socks5://127.0.0.1:1080
+```
+
+reaper uses the SOCKS5 no-auth method (RFC 1928) with a DOMAINNAME address type
+so the proxy resolves the hostname — correct for targets only reachable via the
+proxy network. The scope check runs **before** the proxy connection is opened,
+so `OutOfScopeError` still fires without sending a byte to the proxy. Only
+`socks5://` and `socks5h://` schemes are accepted; `http://` proxies are not
+supported for the raw burst sockets (use `httpx[socks]` for baseline-only
+routing if needed).
+
 ### Transport auto-selection
 
 `--transport auto` (default) probes the target and picks the burst transport:
@@ -117,11 +142,12 @@ reaper --version
 reaper single --target URL --request REQFILE --copies N
               [--transport {auto,h2-single-packet,h1-last-byte-sync}]
               [--scope-file PATH] [--format {json,text,h1md,sarif}]
-              [--baseline-samples N] [--rate-limit RPS] [--timeout S] [--insecure]
+              [--baseline-samples N] [--rate-limit RPS]
+              [--proxy socks5://HOST:PORT] [--timeout S] [--insecure]
 reaper group  --target URL --group-file GROUPFILE
               [--transport {auto,h2-single-packet,h1-last-byte-sync}]
               [--scope-file PATH] [--format {json,text,h1md,sarif}]
-              [--timeout S] [--insecure]
+              [--proxy socks5://HOST:PORT] [--timeout S] [--insecure]
 ```
 
 - `--target` — the URL / host the race is fired against (must be in scope).
@@ -134,6 +160,7 @@ reaper group  --target URL --group-file GROUPFILE
 - `--format` — finding output: `json` (default), `text`, `h1md`, or `sarif`.
 - `--baseline-samples` — sequential baseline samples to send first (default `0`,
   opt-in; see Methodology above).
+- `--proxy` — SOCKS5 proxy URL (`socks5://host:port`) for all traffic (v0.2).
 - `--rate-limit` — baseline requests/second (scan-primitives token bucket).
 - `--timeout` — per-socket / per-request timeout in seconds (default `10`).
 - `--insecure` — skip TLS certificate verification (`https` targets only).
@@ -193,16 +220,19 @@ The single differentiator — the **HTTP/2 single-packet attack** — plus the
 HTTP/1.1 last-byte-sync fallback, connection warming, statistical deviation
 confirmation, and the CI race-lab are the v0.1 build (see `V0.1-CRITERIA.md`).
 
-**Explicitly NOT in v0.1** (deferred):
+**Shipped in v0.2:**
+
+- **SOCKS5 proxy support** (`--proxy socks5://host:port`) — baseline and raw
+  burst both route through the tunnel.
+
+**Deferred (post-v0.2):**
 
 - **First-sequence-sync / >65KB bodies / >~30 requests** (RyotaK: IP
   fragmentation + TCP sequence reordering at L3–L4; needs scapy, raw sockets,
-  root) → **v0.2**.
+  root).
 - **HTTP/3 single-datagram attack** (QUIC) — new protocol surface, low prevalence.
-- **Auto-calibration of multi-endpoint delays** (Kettle client-side timing) —
-  ship manual delays first.
-- **Endpoint auto-discovery, distributed / multi-host bursts, SOCKS/proxy
-  chaining, any GUI.**
+- **Auto-calibration of multi-endpoint delays** (Kettle client-side timing).
+- **Endpoint auto-discovery, distributed / multi-host bursts, any GUI.**
 
 ## License / Attribution
 

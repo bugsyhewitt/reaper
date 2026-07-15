@@ -101,6 +101,16 @@ def _common_options() -> argparse.ArgumentParser:
         ),
     )
     common.add_argument(
+        "--proxy",
+        default=None,
+        metavar="URL",
+        help=(
+            "SOCKS5 proxy URL (e.g. socks5://127.0.0.1:1080) to route ALL "
+            "traffic through — baseline requests AND the raw H2/H1 burst. "
+            "Useful for routing bursts through Caido/Burp or internal proxies."
+        ),
+    )
+    common.add_argument(
         "--rate-limit",
         type=float,
         default=None,
@@ -253,6 +263,7 @@ def _run_single(args: argparse.Namespace) -> int:
             transport=args.transport,
             baseline_samples=args.baseline_samples,
             rate_limit=args.rate_limit,
+            proxy=getattr(args, "proxy", None),
             timeout=args.timeout,
             verify_tls=not args.insecure,
         )
@@ -284,6 +295,7 @@ def _run_group(args: argparse.Namespace) -> int:
             scope=scope,
             group=group,
             transport=args.transport,
+            proxy=getattr(args, "proxy", None),
             timeout=args.timeout,
             verify_tls=not args.insecure,
         )
