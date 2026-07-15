@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reaper"
-version = "0.3.0"
+version = "0.4.0"
 description = "Headless HTTP/2 single-packet race-condition detector for authorized bug-bounty and penetration testing."
 readme = "README.md"
 requires-python = ">=3.13"

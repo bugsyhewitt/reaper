@@ -219,6 +219,65 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_group.set_defaults(handler=_run_group)
 
+    p_detect = sub.add_parser(
+        "detect",
+        help="detect transport and estimate race window width (pre-attack recon)",
+        description=(
+            "Probe a target for HTTP/2 vs HTTP/1.1 support, fire a small "
+            "non-destructive burst to estimate the race window width, and "
+            "print a recommended attack invocation. Run this before 'single' "
+            "or 'group' to confirm H2 is available and check server concurrency."
+        ),
+    )
+    p_detect.add_argument(
+        "--target",
+        required=True,
+        metavar="URL",
+        help="target URL to probe (must be in scope)",
+    )
+    p_detect.add_argument(
+        "--scope-file",
+        metavar="PATH",
+        dest="scope_file",
+        help="scope file (one host/CIDR per line); enforced before any socket opens",
+    )
+    p_detect.add_argument(
+        "--probe-copies",
+        type=int,
+        default=10,
+        dest="probe_copies",
+        metavar="N",
+        help=(
+            "number of concurrent GET / probes for window estimation "
+            "(default: 10; use 2-30)"
+        ),
+    )
+    p_detect.add_argument(
+        "--proxy",
+        default=None,
+        metavar="URL",
+        help="SOCKS5 proxy URL (e.g. socks5://127.0.0.1:1080) for all probe traffic",
+    )
+    p_detect.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="per-socket / per-request timeout in seconds (default: 10)",
+    )
+    p_detect.add_argument(
+        "--insecure",
+        action="store_true",
+        help="skip TLS certificate verification (https targets only)",
+    )
+    p_detect.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        dest="output_format",
+        help="output format: 'text' (default) or 'json'",
+    )
+    p_detect.set_defaults(handler=_run_detect)
+
     return parser
 
 
@@ -299,6 +358,62 @@ def _run_single(args: argparse.Namespace) -> int:
 
     _emit(result, args.output_format)
     return _EXIT_FINDING if result.findings else _EXIT_OK
+
+
+def _run_detect(args: argparse.Namespace) -> int:
+    import json as _json
+
+    from reaper.detect import run_detect
+    from reaper.httpspec import split_target
+    from scan_primitives import OutOfScopeError
+
+    if args.probe_copies < 2:
+        print("error: --probe-copies must be at least 2", file=sys.stderr)
+        return _EXIT_RUNTIME
+
+    try:
+        if args.scope_file:
+            from scan_primitives import load_scope
+            scope = load_scope(args.scope_file)
+        else:
+            _scheme, host, _port, _authority = split_target(args.target)
+            from scan_primitives import Scope
+            scope = Scope.from_entries([host])
+
+        result = run_detect(
+            target=args.target,
+            scope=scope,
+            probe_copies=args.probe_copies,
+            proxy=getattr(args, "proxy", None),
+            timeout=args.timeout,
+            verify_tls=not args.insecure,
+        )
+    except OutOfScopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+    except (TransportError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+
+    if args.output_format == "json":
+        print(_json.dumps(result.to_dict(), indent=2))
+    else:
+        print(f"transport : {result.transport}")
+        print(f"protocol  : {result.protocol}")
+        if result.window:
+            w = result.window
+            print(
+                f"window    : spread={w.spread:.1f}ms  "
+                f"min={w.minimum:.1f}ms  median={w.median:.1f}ms  "
+                f"max={w.maximum:.1f}ms  stdev={w.stdev:.1f}ms"
+            )
+        else:
+            print("window    : (no probe responses)")
+        print(f"concurrency: {result.concurrency_hint}")
+        print(f"probe     : {result.probe_successes}/{result.probe_copies} 2xx")
+        print()
+        print(result.recommendation)
+    return _EXIT_OK
 
 
 def _run_group(args: argparse.Namespace) -> int:
