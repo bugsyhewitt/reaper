@@ -187,12 +187,37 @@ def build_parser() -> argparse.ArgumentParser:
             "V0.1-CRITERIA.md #4."
         ),
     )
-    p_group.add_argument(
+    _group_mode = p_group.add_mutually_exclusive_group(required=True)
+    _group_mode.add_argument(
         "--group-file",
-        required=True,
         metavar="GROUPFILE",
         dest="group_file",
+        default=None,
         help="request-group file: heterogeneous requests + manual per-request delays",
+    )
+    _group_mode.add_argument(
+        "--state-chain",
+        metavar="FILE1,FILE2,...",
+        dest="state_chain",
+        default=None,
+        help=(
+            "comma-separated list of request files to fire as a single synchronized "
+            "chain (one request per endpoint, all final DATA frames sent in one "
+            "send() call). Classic use-case: race /transfer + /balance-check to "
+            "exploit a TOCTOU. Each file is a raw HTTP request in Burp/Repeater "
+            "format."
+        ),
+    )
+    p_group.add_argument(
+        "--chain-window",
+        type=float,
+        default=10.0,
+        dest="chain_window",
+        metavar="MS",
+        help=(
+            "maximum acceptable client-side response-time spread (ms) for a "
+            "--state-chain burst to be considered co-arrived (default: 10ms)"
+        ),
     )
     p_group.add_argument(
         "--auto-delay",
@@ -417,6 +442,8 @@ def _run_detect(args: argparse.Namespace) -> int:
 
 
 def _run_group(args: argparse.Namespace) -> int:
+    if args.state_chain:
+        return _run_state_chain(args)
     # V0.1-CRITERIA.md #4 + #5: manual-delay heterogeneous group, one release,
     # then burst deviation confirmation.
     from reaper.httpspec import parse_group_file, split_target
@@ -448,6 +475,100 @@ def _run_group(args: argparse.Namespace) -> int:
 
     _emit(result, args.output_format)
     return _EXIT_FINDING if result.findings else _EXIT_OK
+
+
+def _run_state_chain(args: argparse.Namespace) -> int:
+    """``reaper group --state-chain file1,file2,...`` handler.
+
+    Parses each file as a single raw HTTP request, fires them all in one
+    synchronized window via SinglePacketEngine.run_group, then reports
+    per-endpoint timing spread and differential responses.
+    """
+    import json as _json
+
+    from reaper.httpspec import parse_request_file, split_target
+    from reaper.runner import run_state_chain_scenario
+    from scan_primitives import OutOfScopeError
+
+    file_paths = [p.strip() for p in args.state_chain.split(",") if p.strip()]
+    if len(file_paths) < 2:
+        print(
+            "error: --state-chain requires at least 2 comma-separated files",
+            file=sys.stderr,
+        )
+        return _EXIT_RUNTIME
+
+    try:
+        scope = _load_scope(args)
+        _scheme, _host, _port, authority = split_target(args.target)
+
+        chain: list[tuple[str, object]] = []
+        for path_str in file_paths:
+            fp = Path(path_str)
+            req = parse_request_file(fp.read_bytes(), default_authority=authority)
+            chain.append((fp.name, req))
+
+        result = run_state_chain_scenario(
+            target=args.target,
+            scope=scope,
+            chain=chain,
+            transport=args.transport,
+            window_ms=getattr(args, "chain_window", 10.0),
+            proxy=getattr(args, "proxy", None),
+            timeout=args.timeout,
+            verify_tls=not args.insecure,
+        )
+    except OutOfScopeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+    except (TransportError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return _EXIT_RUNTIME
+
+    findings = result.findings
+    fmt = args.output_format
+    if fmt == "json":
+        out = {
+            "transport": result.transport,
+            "analysis": {
+                "spread_ms": result.analysis.spread_ms,
+                "within_window": result.analysis.within_window,
+                "window_ms": result.analysis.window_ms,
+                "differential_found": result.analysis.differential_found,
+                "reason": result.analysis.reason,
+                "per_endpoint": result.analysis.per_endpoint,
+                "timing": result.analysis.timing,
+            },
+            "findings": [f.to_dict() for f in findings],
+        }
+        print(_json.dumps(out, indent=2, default=str))
+    elif fmt == "sarif":
+        from reaper.sarif import to_sarif
+        print(_json.dumps(to_sarif(findings), indent=2, default=str))
+    elif fmt == "h1md":
+        from reaper.reporting import to_h1md
+        print(to_h1md(findings) if findings else "_No confirmed chain findings._")
+    else:  # text
+        a = result.analysis
+        print(f"transport : {result.transport}")
+        print(f"endpoints : {len(result.chain_results)}")
+        print(f"spread    : {a.spread_ms:.1f}ms  (window: {a.window_ms}ms)")
+        print(f"window ok : {a.within_window}")
+        print(f"diff found: {a.differential_found}")
+        print(f"result    : {a.reason}")
+        print()
+        for ep in a.per_endpoint:
+            diff_tag = " [DIFF]" if ep["differential"] else ""
+            print(
+                f"  {ep['label']:30s}  {ep['path']:30s}  "
+                f"HTTP {ep['status']}  {ep['elapsed_ms']:.1f}ms{diff_tag}"
+            )
+        if findings:
+            print()
+            for f in findings:
+                print(f"  finding: [{f.severity}/{f.confidence}] {f.title}")
+
+    return _EXIT_FINDING if findings else _EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:
