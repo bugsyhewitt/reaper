@@ -17,12 +17,12 @@ Where PortSwigger's Turbo Intruder is Burp/Jython-locked, reaper is a standalone
 CLI. Findings come out in the suite finding schema, **SARIF 2.1.0**, and
 HackerOne markdown (via `h1-reporter`).
 
-> **Status:** v0.3. The v0.1 core (HTTP/2 single-packet engine, HTTP/1.1
+> **Status:** v0.4. The v0.1 core (HTTP/2 single-packet engine, HTTP/1.1
 > last-byte-sync fallback, scan-primitives baseline, deviation confirmation) is
 > complete. v0.2 added **SOCKS5 proxy support**. v0.3 adds **auto-calibrated
-> delay** (`--auto-delay`) for the group scenario — reaper measures baseline RTT
-> with warm-up requests and distributes the group's inter-request delays across
-> that window automatically (Kettle client-side timing).
+> delay** (`--auto-delay`) for the group scenario. v0.4 adds **`reaper detect`**
+> — a pre-attack recon command that auto-detects transport (H2 vs H1.1) and
+> estimates race window width by firing a non-destructive probe burst.
 
 ## Ethical Use
 
@@ -63,8 +63,21 @@ shop.example.com
 
 ## Usage
 
-reaper exposes two race scenarios as subcommands. Both take a `--target`, an
-optional `--scope-file`, a `--transport`, and a `--format`.
+reaper exposes a recon command (`detect`) and two race scenario subcommands
+(`single`, `group`). All take a `--target` and an optional `--scope-file`.
+
+**Pre-attack recon** — detect the target's transport and estimate the race
+window width before committing to a full attack:
+
+```bash
+reaper detect --target https://shop.example.com/redeem --scope-file scope.txt
+```
+
+Prints detected transport (`h2-single-packet` or `h1-last-byte-sync`), the
+estimated race window spread, a concurrency hint (`concurrent` / `serialized`),
+and a recommended attack invocation. Pass `--format json` to get machine-readable
+output. A serialized hint means the server is likely processing concurrent
+requests sequentially — the race window may be narrow.
 
 **Single-endpoint limit-overrun** — replay one request in N identical concurrent
 copies against a single synchronized gate (the 80% case: over-redeem a coupon,
@@ -147,6 +160,10 @@ Force one with `--transport h2-single-packet` or `--transport h1-last-byte-sync`
 
 ```
 reaper --version
+reaper detect --target URL
+              [--scope-file PATH] [--probe-copies N]
+              [--proxy socks5://HOST:PORT] [--timeout S] [--insecure]
+              [--format {text,json}]
 reaper single --target URL --request REQFILE --copies N
               [--transport {auto,h2-single-packet,h1-last-byte-sync}]
               [--scope-file PATH] [--format {json,text,h1md,sarif}]
@@ -180,6 +197,8 @@ reaper group  --target URL --group-file GROUPFILE
   from manual delay tuning.
 - `--auto-delay-samples N` — *(group only, v0.3)* number of warm-up requests
   to average for RTT measurement when `--auto-delay` is set (default `3`).
+- `--probe-copies N` — *(detect only, v0.4)* number of concurrent `GET /`
+  probes to fire for the window estimation burst (default `10`, range `2–30`).
 
 ## Example output
 
@@ -249,7 +268,15 @@ confirmation, and the CI race-lab are the v0.1 build (see `V0.1-CRITERIA.md`).
   the guesswork from `@delay` tuning for MFA/OTP and email-confirm sub-state
   races.
 
-**Deferred (post-v0.3):**
+**Shipped in v0.4:**
+
+- **`reaper detect`** — pre-attack recon command. Probes the target for HTTP/2
+  vs HTTP/1.1 support, fires a non-destructive probe burst (`GET /`) with the
+  detected transport, and reports the race window spread, a concurrency hint
+  (`concurrent` / `serialized`), and a recommended attack invocation. Useful as
+  a first step before committing to a full race attempt.
+
+**Deferred (post-v0.4):**
 
 - **First-sequence-sync / >65KB bodies / >~30 requests** (RyotaK: IP
   fragmentation + TCP sequence reordering at L3–L4; needs scapy, raw sockets,
