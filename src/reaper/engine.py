@@ -388,8 +388,7 @@ class SinglePacketEngine:
     # -- scope + connection ------------------------------------------------- #
 
     def _assert_scope(self) -> None:
-        if self.scope is not None and self.target is not None:
-            self.scope.assert_in_scope(self.target)
+        _check_scope(self.scope, self.target)
 
     def _connect(self) -> tuple[socket.socket, H2Connection, str, str]:
         """Open a scope-checked HTTP/2 connection; return (sock, conn, scheme, authority)."""
@@ -481,7 +480,7 @@ class SinglePacketEngine:
             conn.ping(b"\x00\x00\x00\x00\x00\x00\x00\x00")
             sock.sendall(conn.data_to_send())
 
-        distinct_delays = {d for d in delays.values()}
+        distinct_delays = set(delays.values())
         fire_ts = time.perf_counter()
         if distinct_delays == {0.0}:
             # Single synchronized release: one send() of all withheld frames.
@@ -598,6 +597,12 @@ class SinglePacketEngine:
         return self._run(list(group))
 
 
+def _check_scope(scope: Any, target: str | None) -> None:
+    """Assert *target* is in *scope* when both are set."""
+    if scope is not None and target is not None:
+        scope.assert_in_scope(target)
+
+
 def _status_of(headers: list[tuple[str, str]]) -> int:
     """Extract the numeric ``:status`` from an HTTP/2 response header block."""
     for name, value in headers:
@@ -643,8 +648,7 @@ class LastByteSyncEngine:
         self.proxy = proxy
 
     def _assert_scope(self) -> None:
-        if self.scope is not None and self.target is not None:
-            self.scope.assert_in_scope(self.target)
+        _check_scope(self.scope, self.target)
 
     def _open(self, scheme: str, host: str, port: int) -> socket.socket:
         sock = _tcp_connect_proxied(host, port, self.timeout, proxy=self.proxy)

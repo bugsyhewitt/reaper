@@ -44,7 +44,7 @@ from reaper.engine import (
     select_transport,
 )
 from reaper.findings import Finding
-from reaper.httpspec import RaceRequest, ResponseSignature, split_target
+from reaper.httpspec import RaceRequest, ResponseSignature
 
 __all__ = [
     "ScenarioResult",
@@ -194,7 +194,6 @@ def run_single_scenario(
         expected_max_successes=expected_max_successes,
         final_state_success_count=final_state_success_count,
     )
-    _scheme, _host, _port, _auth = split_target(target)
     finding = build_finding(
         analysis,
         target=target,
@@ -299,8 +298,7 @@ def run_state_chain_scenario(
         chain_results, window_ms=window_ms, expected_status=expected_status
     )
 
-    _, _, _, _auth = split_target(target)
-    first_path = requests[0].path if requests else "/"
+    first_path = requests[0].path
     vector = _vector(chosen, first_path)
 
     finding = build_chain_finding(
