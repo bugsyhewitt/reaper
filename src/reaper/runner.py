@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import dataclasses
+
 from reaper.analysis import RaceAnalysis, build_finding, confirm_race
 from reaper.client import BaselineClient
 from reaper.engine import (
@@ -213,16 +215,41 @@ def run_group_scenario(
     timeout: float = 10.0,
     verify_tls: bool = True,
     finding_id: str = "reaper-0001",
+    auto_delay: bool = False,
+    auto_delay_samples: int = 3,
 ) -> ScenarioResult:
     """Minimal multi-endpoint scenario (V0.1-CRITERIA.md #4).
 
     A heterogeneous request group sharing one HTTP/2 connection, released on
-    manual per-request delays in one window. Group mode requires HTTP/2 (one
+    per-request delays in one window. Group mode requires HTTP/2 (one
     multiplexed connection); it does not fall back to the per-connection H1
     engine. Scope is enforced before any socket opens.
+
+    When ``auto_delay`` is True, reaper measures the baseline RTT to the
+    target with a warm-up GET / (via :func:`~reaper.autodelay.measure_rtt`)
+    and distributes the N requests evenly across that window using
+    :func:`~reaper.autodelay.auto_delays`. The ``@delay`` values in the
+    group file are overridden.
     """
     if scope is not None:
         scope.assert_in_scope(target)
+
+    if auto_delay:
+        from reaper.autodelay import auto_delays, measure_rtt
+
+        rtt = measure_rtt(
+            target,
+            scope,
+            proxy=proxy,
+            timeout=timeout,
+            verify_tls=verify_tls,
+            samples=auto_delay_samples,
+        )
+        computed = auto_delays(rtt, len(group))
+        group = [
+            dataclasses.replace(req, delay=d)
+            for req, d in zip(group, computed)
+        ]
 
     chosen = select_transport(
         target, prefer=transport, scope=scope, verify_tls=verify_tls, proxy=proxy

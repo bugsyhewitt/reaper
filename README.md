@@ -17,11 +17,12 @@ Where PortSwigger's Turbo Intruder is Burp/Jython-locked, reaper is a standalone
 CLI. Findings come out in the suite finding schema, **SARIF 2.1.0**, and
 HackerOne markdown (via `h1-reporter`).
 
-> **Status:** v0.2. The v0.1 core (HTTP/2 single-packet engine, HTTP/1.1
+> **Status:** v0.3. The v0.1 core (HTTP/2 single-packet engine, HTTP/1.1
 > last-byte-sync fallback, scan-primitives baseline, deviation confirmation) is
-> complete. v0.2 adds **SOCKS5 proxy support** — route the baseline and raw
-> H2/H1 burst through any SOCKS5 proxy (Caido, Burp, Tor, internal pivot) via
-> `--proxy socks5://host:port`.
+> complete. v0.2 added **SOCKS5 proxy support**. v0.3 adds **auto-calibrated
+> delay** (`--auto-delay`) for the group scenario — reaper measures baseline RTT
+> with warm-up requests and distributes the group's inter-request delays across
+> that window automatically (Kettle client-side timing).
 
 ## Ethical Use
 
@@ -75,18 +76,25 @@ reaper single --target https://shop.example.com/redeem \
 ```
 
 **Minimal multi-endpoint** — race a heterogeneous request group (different
-methods / paths / bodies) sharing a session, with **manual** per-request delays
-and one synchronized release (MFA/OTP and email-confirm sub-state races):
+methods / paths / bodies) sharing a session, with per-request delays and one
+synchronized release (MFA/OTP and email-confirm sub-state races):
 
 ```bash
+# Auto-calibrated delays (recommended): reaper measures RTT and computes
+# optimal inter-request spacing automatically.
+reaper group --target https://app.example.com \
+  --group-file scenario.group --scope-file scope.txt --auto-delay
+
+# Manual delays: @delay directives in the group file control release offsets.
 reaper group --target https://app.example.com \
   --group-file scenario.group --scope-file scope.txt
 ```
 
 The group file is a sequence of raw HTTP requests separated by a line that is
 exactly `%%%`; each block may be preceded by an `@delay <seconds>` directive
-setting that request's **manual** release offset within the synchronized window
-(never auto-calibrated — see [Roadmap](#roadmap)).
+setting that request's **manual** release offset within the synchronized window.
+With `--auto-delay`, the `@delay` values are overridden by the auto-computed
+delays.
 
 **Methodology.** reaper's authoritative over-limit signal is the concurrent
 burst itself: a correctly synchronized server yields exactly **one** success even
@@ -148,12 +156,13 @@ reaper group  --target URL --group-file GROUPFILE
               [--transport {auto,h2-single-packet,h1-last-byte-sync}]
               [--scope-file PATH] [--format {json,text,h1md,sarif}]
               [--proxy socks5://HOST:PORT] [--timeout S] [--insecure]
+              [--auto-delay] [--auto-delay-samples N]
 ```
 
 - `--target` — the URL / host the race is fired against (must be in scope).
 - `--request` — raw HTTP request file to replay (single-endpoint scenario).
 - `--copies` — number of identical concurrent copies to race (20–30 typical).
-- `--group-file` — request-group file: heterogeneous requests + manual delays.
+- `--group-file` — request-group file: heterogeneous requests + per-request delays.
 - `--transport` — burst transport (default `auto`).
 - `--scope-file` — scope file (one host/CIDR per line); enforced before any burst.
   With no `--scope-file`, scope defaults to exactly the target host.
@@ -164,6 +173,13 @@ reaper group  --target URL --group-file GROUPFILE
 - `--rate-limit` — baseline requests/second (scan-primitives token bucket).
 - `--timeout` — per-socket / per-request timeout in seconds (default `10`).
 - `--insecure` — skip TLS certificate verification (`https` targets only).
+- `--auto-delay` — *(group only, v0.3)* auto-calibrate per-request delays from
+  measured RTT. Sends warm-up GET / requests to the target, computes
+  `delay[i] = i * rtt / N`, and overrides any `@delay` values in the group
+  file. Recommended for most sub-state race scenarios — removes the guesswork
+  from manual delay tuning.
+- `--auto-delay-samples N` — *(group only, v0.3)* number of warm-up requests
+  to average for RTT measurement when `--auto-delay` is set (default `3`).
 
 ## Example output
 
@@ -225,13 +241,20 @@ confirmation, and the CI race-lab are the v0.1 build (see `V0.1-CRITERIA.md`).
 - **SOCKS5 proxy support** (`--proxy socks5://host:port`) — baseline and raw
   burst both route through the tunnel.
 
-**Deferred (post-v0.2):**
+**Shipped in v0.3:**
+
+- **Auto-calibrated delay** (`--auto-delay` / `--auto-delay-samples`) for the
+  group scenario — reaper measures baseline RTT with warm-up GET / requests
+  and computes `delay[i] = i * rtt / N` (Kettle client-side timing), removing
+  the guesswork from `@delay` tuning for MFA/OTP and email-confirm sub-state
+  races.
+
+**Deferred (post-v0.3):**
 
 - **First-sequence-sync / >65KB bodies / >~30 requests** (RyotaK: IP
   fragmentation + TCP sequence reordering at L3–L4; needs scapy, raw sockets,
   root).
 - **HTTP/3 single-datagram attack** (QUIC) — new protocol surface, low prevalence.
-- **Auto-calibration of multi-endpoint delays** (Kettle client-side timing).
 - **Endpoint auto-discovery, distributed / multi-host bursts, any GUI.**
 
 ## License / Attribution
