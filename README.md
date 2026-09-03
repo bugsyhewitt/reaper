@@ -260,52 +260,16 @@ fresh-venv install → `--version` → public-API gate.
 
 ## Roadmap
 
+See [CHANGELOG.md](CHANGELOG.md) for the full per-version release history and [POST_V01.md](POST_V01.md) for the post-v1.0 roadmap.
+
 The single differentiator — the **HTTP/2 single-packet attack** — plus the
 HTTP/1.1 last-byte-sync fallback, connection warming, statistical deviation
 confirmation, and the CI race-lab are the v0.1 build (see `V0.1-CRITERIA.md`).
-
-**Shipped in v0.2:**
-
-- **SOCKS5 proxy support** (`--proxy socks5://host:port`) — baseline and raw
-  burst both route through the tunnel.
-
-**Shipped in v0.3:**
-
-- **Auto-calibrated delay** (`--auto-delay` / `--auto-delay-samples`) for the
-  group scenario — reaper measures baseline RTT with warm-up GET / requests
-  and computes `delay[i] = i * rtt / N` (Kettle client-side timing), removing
-  the guesswork from `@delay` tuning for MFA/OTP and email-confirm sub-state
-  races.
-
-**Shipped in v0.4:**
-
-- **`reaper detect`** — pre-attack recon command. Probes the target for HTTP/2
-  vs HTTP/1.1 support, fires a non-destructive probe burst (`GET /`) with the
-  detected transport, and reports the race window spread, a concurrency hint
-  (`concurrent` / `serialized`), and a recommended attack invocation. Useful as
-  a first step before committing to a full race attempt.
-
-**Shipped in v0.5:**
-
-- **`reaper group --state-chain file1,file2,...`** — multi-endpoint TOCTOU
-  chain. Fires one request per endpoint simultaneously on a single HTTP/2
-  connection (one synchronized `send()` call). Per-endpoint timing spread and
-  differential-response detection flag TOCTOU races where the classic
-  single-endpoint mode does not apply (e.g. race `/transfer` + `/balance-check`
-  on separate endpoints sharing one resource).
-
-**Shipped in v1.0.0:**
-
-- Version bump and stable release. All v0.1 acceptance criteria are met and all
-  planned improvements through v0.5 are shipped. The engine API is now stable.
-
-**Future work (post-v1.0.0):**
-
-- **First-sequence-sync / >65KB bodies / >~30 requests** (RyotaK: IP
-  fragmentation + TCP sequence reordering at L3–L4; needs scapy, raw sockets,
-  root).
-- **HTTP/3 single-datagram attack** (QUIC) — new protocol surface, low prevalence.
-- **Endpoint auto-discovery, distributed / multi-host bursts, any GUI.**
+Subsequent releases shipped SOCKS5 (v0.2), auto-calibrated delay (v0.3),
+pre-attack recon (v0.4), sub-state TOCTOU chaining (v0.5), and the stable
+v1.0.0 release. The still-unshipped frontier (first-sequence-sync / >65KB
+bodies, HTTP/3 QUIC, endpoint auto-discovery, distributed bursts, GUI) is
+documented in [POST_V01.md](POST_V01.md).
 
 ## License / Attribution
 
