@@ -17,7 +17,7 @@ bytes are passed through, evaluated, or executed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from statistics import fmean, pstdev
 from typing import Iterable
 
