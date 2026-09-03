@@ -313,8 +313,9 @@ def _load_scope(args: argparse.Namespace):
     without a scope file while still forbidding egress to any other host -- the
     conservative default for a synchronized burst.
     """
-    from reaper.httpspec import split_target
     from scan_primitives import Scope, load_scope
+
+    from reaper.httpspec import split_target
 
     if args.scope_file:
         return load_scope(args.scope_file)
@@ -353,9 +354,10 @@ def _emit(result, output_format: str) -> None:
 def _run_single(args: argparse.Namespace) -> int:
     # V0.1-CRITERIA.md #3 + #5: (opt-in) sequential baseline, arm N copies,
     # single-flush burst, then diff baseline vs burst and emit confirmed findings.
+    from scan_primitives import OutOfScopeError
+
     from reaper.httpspec import parse_request_file, split_target
     from reaper.runner import run_single_scenario
-    from scan_primitives import OutOfScopeError
 
     try:
         scope = _load_scope(args)
@@ -386,8 +388,9 @@ def _run_single(args: argparse.Namespace) -> int:
 
 
 def _run_detect(args: argparse.Namespace) -> int:
-    from reaper.detect import run_detect
     from scan_primitives import OutOfScopeError
+
+    from reaper.detect import run_detect
 
     if args.probe_copies < 2:
         print("error: --probe-copies must be at least 2", file=sys.stderr)
@@ -437,9 +440,10 @@ def _run_group(args: argparse.Namespace) -> int:
         return _run_state_chain(args)
     # V0.1-CRITERIA.md #4 + #5: manual-delay heterogeneous group, one release,
     # then burst deviation confirmation.
+    from scan_primitives import OutOfScopeError
+
     from reaper.httpspec import parse_group_file, split_target
     from reaper.runner import run_group_scenario
-    from scan_primitives import OutOfScopeError
 
     try:
         scope = _load_scope(args)
@@ -475,9 +479,10 @@ def _run_state_chain(args: argparse.Namespace) -> int:
     synchronized window via SinglePacketEngine.run_group, then reports
     per-endpoint timing spread and differential responses.
     """
+    from scan_primitives import OutOfScopeError
+
     from reaper.httpspec import parse_request_file, split_target
     from reaper.runner import run_state_chain_scenario
-    from scan_primitives import OutOfScopeError
 
     file_paths = [p.strip() for p in args.state_chain.split(",") if p.strip()]
     if len(file_paths) < 2:

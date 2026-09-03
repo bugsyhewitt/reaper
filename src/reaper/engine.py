@@ -444,7 +444,9 @@ class SinglePacketEngine:
         delays: dict[int, float] = {}
         for req in requests:
             sid = conn.get_next_available_stream_id()
-            conn.send_headers(sid, h2_headers(req, scheme=scheme, authority=authority), end_stream=False)
+            conn.send_headers(
+                sid, h2_headers(req, scheme=scheme, authority=authority), end_stream=False
+            )
             body = req.body
             if body:
                 if len(body) > 1:

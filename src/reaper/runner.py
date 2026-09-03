@@ -22,9 +22,8 @@ deterministic gate specifies.]
 from __future__ import annotations
 
 import asyncio
-from typing import Any
-
 import dataclasses
+from typing import Any
 
 from reaper.analysis import RaceAnalysis, build_finding, confirm_race
 from reaper.chain import (
