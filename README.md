@@ -220,7 +220,7 @@ A confirmed single-packet race renders as a suite finding (CWE-362). In SARIF
   "version": "2.1.0",
   "runs": [
     {
-      "tool": { "driver": { "name": "reaper", "version": "0.1.0", "rules": [ ... ] } },
+      "tool": { "driver": { "name": "reaper", "version": "1.0.0", "rules": [ ... ] } },
       "results": [
         {
           "ruleId": "reaper/single-packet",
@@ -257,6 +257,189 @@ redemptions yield exactly **1** success (control) while N concurrent redemptions
 via reaper's single-packet engine yield **>1** (over-limit). It skips cleanly if
 `hypercorn` is not installed. The `ship_gate` marker runs the slow build →
 fresh-venv install → `--version` → public-API gate.
+
+## Output format examples
+
+All four formats are available via `--format` on `single` and `group`. `detect` supports `text` and `json` only.
+
+### `--format text`
+
+```
+transport: h2-single-packet
+baseline successes: 1 | burst successes: 3 | expected limit: 1
+timing: {'unit': 'ms', 'samples': 20, 'min': 12.4, 'max': 38.1, 'spread': 25.7, ...}
+result: over-limit: burst produced 3 successes, expected at most 1
+confirmed findings: 1
+  - [high/high] Concurrent limit overrun on /redeem (single-packet:/redeem)
+```
+
+### `--format h1md`
+
+Renders a HackerOne-ready markdown bug report via `h1-reporter`. Output is a formatted Markdown block with title, severity, vector, impact, and evidence code blocks — paste directly into a HackerOne submission or your note-taking tool.
+
+```markdown
+## Concurrent limit overrun on /redeem
+
+**Severity:** High | **CWE:** CWE-362 | **Confidence:** High
+
+**Vector:** `single-packet:/redeem`
+
+...evidence blocks...
+```
+
+### `--format json`
+
+```json
+[
+  {
+    "id": "reaper-0001",
+    "tool": "reaper",
+    "title": "Concurrent limit overrun on /redeem",
+    "severity": "high",
+    "confidence": "high",
+    "target": "https://shop.example.com/redeem",
+    "vector": "single-packet:/redeem",
+    "variant": "single-endpoint",
+    "cwe_id": 362,
+    "evidence": {
+      "baseline_summary": { "count": 25, "success_count": 1, "statuses": {"200": 1, "409": 24} },
+      "burst_summary":    { "count": 20, "success_count": 3, "statuses": {"200": 3, "409": 17} },
+      "timing": { "unit": "ms", "samples": 20, "min": 12.4, "max": 38.1, "spread": 25.7 }
+    },
+    "references": ["https://portswigger.net/research/smashing-the-state-machine"]
+  }
+]
+```
+
+### `--format sarif`
+
+See the SARIF 2.1.0 example in the [Example output](#example-output) section above.
+
+## Worked walkthroughs
+
+### `reaper detect` — pre-attack recon
+
+```bash
+reaper detect --target https://shop.example.com/redeem --scope-file scope.txt
+```
+
+Representative output:
+
+```
+transport : h2-single-packet
+protocol  : h2
+window    : spread=4.2ms  min=11.8ms  median=13.5ms  max=16.0ms  stdev=1.3ms
+concurrency: concurrent
+probe     : 10/10 2xx
+
+Recommended attack:
+  reaper single --target https://shop.example.com/redeem \
+    --request redeem.http --copies 20 --scope-file scope.txt
+```
+
+A `concurrency: serialized` hint means the server is processing requests sequentially — the race window may be narrow and the attack less likely to succeed. A `--format json` flag returns the same data as a machine-readable dict.
+
+### `reaper single` — single-endpoint limit overrun
+
+```bash
+# Redeem a coupon 20 times simultaneously in one synchronized packet burst.
+reaper single \
+  --target https://shop.example.com/redeem \
+  --request redeem.http \
+  --copies 20 \
+  --scope-file scope.txt \
+  --format text
+```
+
+`redeem.http` is a raw HTTP request in Burp/Repeater format:
+
+```
+POST /redeem HTTP/1.1
+Host: shop.example.com
+Content-Type: application/json
+Authorization: Bearer eyJ...
+
+{"code": "SAVE20"}
+```
+
+Representative output (race confirmed):
+
+```
+transport: h2-single-packet
+baseline successes: 0 | burst successes: 3 | expected limit: 1
+result: over-limit: burst produced 3 successes, expected at most 1
+confirmed findings: 1
+  - [high/high] Concurrent limit overrun on /redeem (single-packet:/redeem)
+```
+
+Exit code is `1` (finding confirmed). A clean run exits `0`.
+
+### `reaper group` — multi-endpoint sub-state race
+
+```bash
+# Race two endpoints sharing a session — e.g. /verify-otp + /complete-transfer.
+reaper group \
+  --target https://app.example.com \
+  --group-file mfa_race.group \
+  --auto-delay \
+  --scope-file scope.txt \
+  --format json
+```
+
+`mfa_race.group` contains two raw HTTP requests separated by `%%%`:
+
+```
+POST /verify-otp HTTP/1.1
+Host: app.example.com
+Content-Type: application/json
+
+{"code": "123456"}
+%%%
+POST /complete-transfer HTTP/1.1
+Host: app.example.com
+Content-Type: application/json
+
+{"amount": 1000, "to": "attacker"}
+```
+
+`--auto-delay` measures round-trip time and computes optimal inter-request delays automatically; use `--auto-delay-samples 5` to average more RTT samples for a noisy link. With `--format json` the output is the JSON finding array.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Ran cleanly; no confirmed race detected |
+| `1` | Ran cleanly; at least one confirmed race finding emitted |
+| `2` | Usage error — no scenario given (argparse default) |
+| `3` | Runtime error — out-of-scope target, transport failure, or I/O error |
+
+A non-zero exit code on code `3` does **not** mean a race was found — it means reaper could not complete the scan. Check stderr for the error message.
+
+## Troubleshooting / FAQ
+
+**"server closes connection before last byte" or `TransportError: peer closed`**
+
+The target closed the H2 connection mid-flight. Common causes: aggressive idle timeout, H2 stream limit too low, or the server does not support enough concurrent streams. Try `--transport h1-last-byte-sync` to fall back to per-connection H1. If `--transport auto` already selected H1 and the error persists, the target may be load-balanced and closing keep-alive connections faster than the warmup completes — lower `--copies` or add `--timeout 30`.
+
+**"H2 not supported" / transport falls back to h1-last-byte-sync automatically**
+
+The target only speaks HTTP/1.1. reaper automatically falls back under `--transport auto`. The H1 last-byte-sync engine still provides a synchronized burst (one TCP connection per copy, withholds the final byte, flushes all together) but the synchronization window is wider than H2 single-packet. You can force H2 with `--transport h2-single-packet` to confirm the diagnosis; this will error rather than fall back.
+
+**"SOCKS5 timeout" / proxy connection refused**
+
+The proxy is not reachable or the target is not routable via the proxy. Verify with `curl --socks5-hostname 127.0.0.1:1080 https://target` from the same host. For an SSH SOCKS5 tunnel (`ssh -D 1080 jump`), ensure the tunnel is active and the target's hostname resolves through the proxy (reaper uses DOMAINNAME address type, so the proxy resolves the hostname).
+
+**"no race window detected" or `concurrency: serialized` from `reaper detect`**
+
+The server is processing concurrent requests sequentially — either at the application layer (a mutex or a queue), at a load balancer, or behind a rate limiter. The race window may be too narrow to exploit. You can still attempt `reaper single` to confirm, but a serialized server is unlikely to yield a finding. Consider chaining sub-state endpoints with `reaper group --state-chain` where the race depends on ordering rather than true parallelism.
+
+**"out-of-scope" error before any burst**
+
+The `--target` hostname is not in the `--scope-file`. Add the target to the scope file, or omit `--scope-file` to default the scope to exactly the target host. reaper's scope check fires before any socket opens — no bytes are sent to an out-of-scope target.
+
+**reaper finds no race but Turbo Intruder does**
+
+reaper's authoritative signal is the synchronized burst itself — a clean server returns exactly one success even under a concurrent burst. If Turbo Intruder finds a race but reaper does not, the server may be sensitive to the specific request body or session token used. Confirm the request file contains the correct auth token and body. Also consider adding `--baseline-samples 3` to calibrate the expected success count from a sequential run first.
 
 ## Roadmap
 
