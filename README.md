@@ -33,6 +33,137 @@ HackerOne markdown (via `h1-reporter`).
 > - v0.5 — `reaper group --state-chain` multi-endpoint TOCTOU chain
 > - v1.0.0 — stable release; all v0.1 criteria met, no known open gaps
 
+## Architecture
+
+reaper is built as six cooperating modules behind a single CLI entry-point. Each
+module has a narrow responsibility; nothing leaks across the boundary.
+
+### Module map
+
+```
+reaper/
+├── cli.py        — argparse entry-point; routes to _run_single, _run_group, _run_detect
+├── runner.py     — scenario orchestration: scope → transport → baseline → burst → analysis
+├── engine.py     — raw H2/H1 burst transport (SinglePacketEngine, LastByteSyncEngine)
+├── client.py     — scan-primitives BaselineClient wrapper (sequential baseline)
+├── detect.py     — pre-attack recon: transport probe + race-window estimation
+├── autodelay.py  — Kettle RTT-based per-request delay calibration
+├── chain.py      — state-chain TOCTOU analysis (v0.5)
+├── analysis.py   — baseline-vs-burst deviation confirmation + Finding builder
+├── httpspec.py   — data model (RaceRequest, ResponseSignature) + raw-HTTP parsers
+├── findings.py   — Finding schema (CWE-362, severity, evidence)
+├── sarif.py      — SARIF 2.1.0 output adapter
+└── reporting.py  — HackerOne markdown output adapter
+```
+
+### H2 burst engine (`engine.py`)
+
+`SinglePacketEngine` implements the HTTP/2 single-packet attack:
+
+1. **Connect**: open one TCP connection; for `https://` targets, negotiate H2 via
+   ALPN (`h2`). For `http://` cleartext targets, send an H2 prior-knowledge
+   preface (`PRI * HTTP/2.0`) directly — no HTTP Upgrade roundtrip.
+2. **Arm** (`_arm`): open one H2 stream per request via `h2.send_headers()`. For
+   each stream, send all body bytes except the last one (or queue an empty DATA
+   frame for bodyless requests). Every stream is parked one frame short of
+   complete — the server cannot process them until it receives `END_STREAM`.
+3. **Settle**: wait ~100ms with `TCP_NODELAY` enabled. This lets TCP buffers
+   flush all the priming data to the server so the final frames are the only
+   thing left to send.
+4. **Fire** (`_fire`): disable `TCP_NODELAY` (Nagle enabled) and send **all**
+   withheld final frames in a single `send()` call. Nagle and the single
+   `send()` together ensure the kernel emits one TCP packet carrying every
+   stream's `END_STREAM` flag. The server dequeues all N requests in one
+   read — this is the race window.
+5. **Collect** (`_collect`): read all N responses; return one `ResponseSignature`
+   per stream (status, body-SHA256, body length, elapsed ms from fire timestamp).
+
+`LastByteSyncEngine` provides the HTTP/1.1 fallback: N TCP connections opened in
+parallel, each warmed with a benign `GET /` to clear TCP slow-start, then one
+final byte withheld per connection. All final bytes are released in a tight loop.
+Synchronization is weaker than H2 single-packet (network jitter between
+per-connection sends), but it still creates a race window on a correctly
+instrumented target.
+
+### Transport auto-selection
+
+`select_transport` in `engine.py` probes the target before the burst:
+
+- For `https://` targets: open a TLS connection with ALPN `["h2", "http/1.1"]` and
+  check `selected_alpn_protocol()`. H2 negotiated → `h2-single-packet`; H1 → `h1-last-byte-sync`.
+- For `http://` targets: send the H2 prior-knowledge preface and check whether the
+  server responds with an H2 `SETTINGS` frame. Yes → `h2-single-packet`; No or
+  error → `h1-last-byte-sync`.
+- Any `OSError` during probing falls back to `h1-last-byte-sync` silently.
+
+When `--proxy` is set, the probe routes through the SOCKS5 tunnel first so the
+transport decision reflects what is reachable through the proxy.
+
+### Auto-calibrated delay (`autodelay.py`)
+
+The `measure_rtt` function sends `--auto-delay-samples` benign `GET /` requests
+through the scan-primitives `BaselineClient` and returns the mean elapsed time
+in seconds. Only elapsed_ms is kept; response bodies are discarded (R5).
+
+`auto_delays(rtt, count)` applies Kettle's client-side timing heuristic:
+
+```
+delay[i] = i * rtt / count    for i in 0 .. count-1
+```
+
+This distributes `count` group requests evenly across one RTT window so they all
+arrive at the server within the same processing cycle. `delay[0]` is always
+`0.0`; `delay[count-1]` is `(count-1) * rtt / count`, strictly less than one RTT.
+The delays override any `@delay` values in the group file.
+
+### Pre-attack recon (`detect.py`)
+
+`run_detect` ties together transport selection and a small non-destructive probe
+burst into a `DetectResult`. Key outputs:
+
+- `transport` — which burst engine will be used (`h2-single-packet` or `h1-last-byte-sync`).
+- `window` — a `WindowStats` with min / median / max / spread / stdev of the probe
+  response times (in ms). This is a client-side estimate of the server's race
+  window width; a tight spread (<50ms threshold) suggests the server processes
+  concurrent requests in parallel.
+- `concurrency_hint` — `"concurrent"` when `spread < 50ms`, `"serialized"` when
+  the spread is wide (server likely serializes). A serialized hint means a race
+  window may be narrow but doesn't rule out a finding.
+- `recommendation` — a copy-paste ready attack invocation.
+
+The probe fires benign `GET /` requests — it does not touch the target endpoint
+under test and does not consume any single-use resource.
+
+### State-chain TOCTOU (`chain.py`)
+
+`analyze_chain` takes the per-endpoint results of a `reaper group --state-chain`
+burst and reports:
+
+- `spread_ms` — response-time spread across all chain endpoints (a proxy for
+  client-side co-arrival). A tight spread suggests all requests landed at the
+  server in one processing window.
+- `within_window` — `spread_ms <= window_ms` (default 10ms).
+- `differential_found` — any endpoint returned an HTTP status different from the
+  expected (default 200).
+
+A `differential_found=True` with a tight spread is the signal for a TOCTOU race:
+one endpoint's read of shared state saw an inconsistency because another endpoint
+was writing at the same time. `build_chain_finding` turns this into a CWE-362
+`Finding`.
+
+### Scenario orchestration (`runner.py`)
+
+`run_single_scenario` and `run_group_scenario` wire the pieces in order:
+
+1. Assert the target is in scope (`scan_primitives.Scope.assert_in_scope`).
+2. Select the transport (`select_transport`), or use the caller's `--transport`.
+3. If `baseline_samples > 0`: run the sequential baseline through
+   `BaselineClient` to establish the expected success count.
+4. Build and fire the burst through `SinglePacketEngine` or `LastByteSyncEngine`.
+5. Pass the baseline and burst signatures to `confirm_race` (analysis module).
+6. If `is_race=True`, build a `Finding` via `build_finding` and return a
+   `ScenarioResult` with transport, signatures, analysis, and findings.
+
 ## Ethical Use
 
 You are responsible for ensuring you have authorization to test any target.
@@ -314,6 +445,132 @@ Renders a HackerOne-ready markdown bug report via `h1-reporter`. Output is a for
 ### `--format sarif`
 
 See the SARIF 2.1.0 example in the [Example output](#example-output) section above.
+
+## The HTTP/2 single-packet attack
+
+The HTTP/2 single-packet attack was first described by James Kettle (albinowax)
+at DEF CON 31, 2023, in *Smashing the State Machine*. It exploits a fundamental
+property of HTTP/2 multiplexing to eliminate network jitter as a source of false
+negatives in race-condition testing.
+
+### Why traditional concurrent requests miss races
+
+Classic race testing (HTTP/1.1 threaded — the [`race-the-web`](https://github.com/aaronhnatiw/race-the-web)
+approach) fires multiple requests in parallel, each on its own TCP connection.
+Even with thread synchronization, network jitter between connections means the
+requests arrive at the server in a spread that can be tens or hundreds of
+milliseconds wide. A server that processes shared-state mutations within a 1ms
+window will not be caught by a 50ms spread — the second request arrives after
+the first has already committed.
+
+### How HTTP/2 multiplexing closes the window
+
+HTTP/2 carries multiple request streams over a single TCP connection. Each
+stream is independent, but they share the same socket buffer — which means a
+server reads all of them in one `recv()` call when they arrive together.
+
+The single-packet attack exploits this:
+
+1. All N requests are sent as N H2 streams, with their final `DATA+END_STREAM`
+   frame **withheld**. The server receives each request's headers and all body
+   bytes except the last — it cannot process any of them until `END_STREAM`
+   arrives.
+2. After a ~100ms settle, all withheld final frames are released in a **single
+   `send()` call** with Nagle's algorithm enabled. The kernel batches them into
+   one TCP segment.
+3. The server receives one packet, dequeues N requests simultaneously, and
+   schedules N handler goroutines/threads in one event-loop tick. All N requests
+   enter the shared-state critical section within the same scheduler quantum.
+
+The result: network jitter is eliminated. The race window is determined by the
+server's internal scheduling, not by the client's network path.
+
+### Why this beats Turbo Intruder
+
+PortSwigger's Turbo Intruder implements the same technique (it was in Kettle's
+original research), but it is locked to Burp Suite's Java/Jython runtime and is
+hard to integrate into headless pipelines. reaper is a standalone CLI that:
+
+- Requires no Burp Suite or JVM.
+- Outputs SARIF 2.1.0, JSON, and HackerOne markdown — integrating cleanly with
+  CI and bug-bounty workflows.
+- Enforces scope via `scan-primitives` before any burst.
+- Supports SOCKS5 proxying for internal targets.
+
+### Server requirements for the single-packet attack to work
+
+The H2 single-packet attack requires the target server to:
+
+1. **Speak HTTP/2** — either via TLS+ALPN on `https://` or via h2c prior
+   knowledge on `http://`. HTTP/1.1-only servers fall back to last-byte-sync
+   automatically (`--transport auto`).
+2. **Accept enough concurrent streams** — the default H2 `SETTINGS_MAX_CONCURRENT_STREAMS`
+   is 100; most servers support at least 20-30 concurrent streams. If the server
+   enforces a low limit, reaper's burst is capped at that limit.
+3. **Not buffer-serialize requests** — a server that reads all streams into a
+   queue and processes them one at a time will not exhibit the race even when
+   they arrive simultaneously. `reaper detect` measures this with
+   `concurrency_hint`.
+4. **Not require `Content-Length` for body-less requests** — most servers handle
+   bodyless `POST` with just `END_STREAM`; a server that waits for a
+   `Content-Length`-matching body before processing will not race.
+
+## Race condition model
+
+Race conditions in HTTP APIs typically fall into three patterns. reaper has a
+subcommand for each.
+
+### Limit-overrun (the 80% case) — `reaper single`
+
+A single resource is guarded by a check-then-commit sequence:
+
+```
+1. Read the current count (e.g. coupon uses = 0)
+2. Check the count is below the limit (0 < 1 → allow)
+3. Increment and commit (uses = 1)
+```
+
+Under a synchronized burst, N requests all read the same initial state at step 1
+(uses = 0), all pass the check at step 2, and all attempt to commit at step 3.
+Only one commit writes `uses = 1`; the others may also write `1` on a last-write-
+wins resource, or may each write independently if the increment is not atomic.
+The result: N successes where the resource limit allows one.
+
+This is the classic coupon over-redemption, withdrawal over-draw, free-tier
+over-use, and vote-stuffing pattern. Kettle's research found it is by far the
+most common exploitable race in web applications.
+
+### Sub-state race — `reaper group`
+
+A session-bound operation transitions through intermediate states, and an
+attacker can fire two requests that both read the same intermediate state before
+either commits. Example: a password-reset flow that sets a `password_reset_token`
+in the session and checks it on the next request. Racing two `POST /reset`
+requests may allow both to consume the same token.
+
+The group file captures a heterogeneous set of requests with explicit or
+auto-calibrated per-request delays. `--auto-delay` uses Kettle's RTT heuristic
+to distribute requests across one RTT window without manual tuning.
+
+### TOCTOU chaining — `reaper group --state-chain`
+
+A time-of-check to time-of-use (TOCTOU) race fires two *different* endpoints
+in the same window: one that reads shared state (the check) and one that modifies
+it (the use). Classic example:
+
+```
+Request 1: POST /transfer  {"amount": 1000, "to": "attacker"}
+Request 2: GET  /balance   {}
+```
+
+If the balance endpoint is called after the transfer has debited the account but
+before the transaction is committed, it may return the pre-debit balance.
+A differential response (the balance returned differs from what the post-transfer
+balance should be) is the signal.
+
+`--state-chain` fires each request file against its own endpoint in one
+synchronized window. `reaper` reports timing spread (did they co-arrive?) and
+differential status codes (did any endpoint return an unexpected response?).
 
 ## Worked walkthroughs
 
